@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging and coverage
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Simulator outputs
+sim_build/
+work/
+obj_dir/
+csrc/
+*.vvp
+*.o
+*.so
+*.daidir/
+*.simv
+*.simv.daidir/
+transcript
+vsim.wlf
+
+# Waveforms
+*.vcd
+*.fst
+*.fsdb
+*.ghw
+*.wdb
+*.trn
+
+# Vivado and FPGA generated files
+.Xil/
+*.jou
+*.str
+*.xpr
+*.runs/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.gen/
+*.srcs/
+*.sim/
+*.bit
+*.ltx
+*.dcp
+*.rpt
+
+# Logs
+*.log
+*.out
+*.err
+
+# Temporary files and local results
+tmp/
+temp/
+*.tmp
+*.bak
+results/*
+!results/.gitkeep
