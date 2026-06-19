@@ -21,6 +21,7 @@ htmlcov/
 
 # Simulator outputs
 sim_build/
+sim/build/
 work/
 obj_dir/
 csrc/
@@ -70,3 +71,7 @@ temp/
 *.bak
 results/*
 !results/.gitkeep
+!results/plots/
+!results/plots/.gitkeep
+!results/reports/
+!results/reports/.gitkeep

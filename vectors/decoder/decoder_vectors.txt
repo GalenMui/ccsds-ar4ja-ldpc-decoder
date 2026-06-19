@@ -1,0 +1,12 @@
+# name success syndrome_pass fail iterations saturation cycle_min cycle_max
+zero_noiseless 1 1 0 0 0 0 32836
+walk_0_noiseless 1 1 0 1 0 0 32836
+walk_511_noiseless 1 1 0 1 0 0 32836
+walk_512_noiseless 1 1 0 1 0 0 32836
+walk_1023_noiseless 1 1 0 1 0 0 32836
+random_seed_1_noiseless 1 1 0 1 0 0 32836
+random_seed_2_noiseless 1 1 0 1 0 0 32836
+info_region_error_bit_0 1 1 0 3 1470 0 32836
+parity_region_error_bit_1024 1 1 0 3 1536 0 32836
+parity_region_error_bit_1500 1 1 0 3 1536 0 32836
+low_confidence_failure_seed_0 0 0 1 8 0 0 32836
