@@ -29,6 +29,11 @@ def test_sparse_adjacency_shapes():
     assert all(0 <= col < ar4ja.FULL_N for cols in h.row_to_cols for col in cols)
 
 
+def test_check_rows_do_not_repeat_variable_addresses():
+    h = ar4ja.build_h_full_sparse()
+    assert all(len(cols) == len(set(cols)) for cols in h.row_to_cols)
+
+
 def test_transmitted_view_keeps_puncturing_explicit():
     view = ar4ja.build_h_transmitted_view(ar4ja.PUNCTURE_SOLVE)
     assert view.puncture_policy == ar4ja.PUNCTURE_SOLVE
@@ -49,4 +54,3 @@ def test_transmitted_reconstruction_for_zero_word():
 def test_bit_ordering_is_documented():
     assert "index 0" in ar4ja.BIT_ORDERING
     assert "CCSDS Bit 0" in ar4ja.BIT_ORDERING
-

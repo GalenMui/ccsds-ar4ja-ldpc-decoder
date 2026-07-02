@@ -39,3 +39,28 @@ def test_noiseless_high_confidence_llrs_match_transmitted_bits():
     result = decode_normalized_min_sum_fixed(llr, iterations=0)
     assert np.array_equal(result.hard_transmitted, tx)
 
+
+def test_layered_decoder_recovers_punctured_variables_for_noiseless_word():
+    payload = np.zeros(ar4ja.INFO_N, dtype=np.uint8)
+    payload[0] = 1
+    tx = ldpc_encoder.encode(payload)
+    llr = bpsk_awgn.noiseless_llr(tx, magnitude=32.0)
+
+    result = decode_normalized_min_sum_fixed(llr, iterations=1)
+    full_expected = ldpc_encoder.encode_full(payload)
+
+    assert result.converged
+    assert result.iterations == 1
+    assert result.saturation_count == 0
+    assert np.array_equal(result.hard_full, full_expected)
+
+
+def test_low_confidence_failure_runs_to_max_iterations():
+    rng = np.random.default_rng(0)
+    llr = rng.integers(-2, 3, ar4ja.TX_N, dtype=np.int16)
+
+    result = decode_normalized_min_sum_fixed(llr, iterations=8)
+
+    assert not result.converged
+    assert result.decoder_fail
+    assert result.iterations == 8

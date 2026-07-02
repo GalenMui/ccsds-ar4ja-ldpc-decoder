@@ -1,4 +1,4 @@
-"""Deterministic fixed-point normalized min-sum LDPC decoder model."""
+"""Deterministic layered fixed-point normalized min-sum LDPC decoder model."""
 
 from __future__ import annotations
 
@@ -35,11 +35,6 @@ def _full_llr(llr: Sequence[int] | np.ndarray) -> np.ndarray:
     raise ValueError(f"expected {ar4ja.TX_N} or {ar4ja.FULL_N} LLRs, got {arr.size}")
 
 
-def _norm_scale(value: int, numerator: int, denominator: int) -> int:
-    scaled = abs(value) * numerator // denominator
-    return scaled if value >= 0 else -scaled
-
-
 def _clip_with_count(value: int, lo: int, hi: int) -> tuple[int, int]:
     clipped = max(lo, min(hi, value))
     return clipped, int(clipped != value)
@@ -54,7 +49,19 @@ def decode_normalized_min_sum_fixed(
     llr_width: int = LLR_WIDTH_DEFAULT,
     message_width: int = 8,
 ) -> FixedDecodeResult:
-    """Decode with integer normalized min-sum and saturating messages."""
+    """Decode with row-serial layered integer normalized min-sum.
+
+    This model is intentionally bit-exact with the RTL baseline:
+
+    * transmitted LLRs initialize variables 0..2047;
+    * punctured variables 2048..2559 initialize to neutral zero;
+    * each check row is processed in ascending row order;
+    * q_mj = L_j - R_mj_old is kept only for the active row;
+    * the first equal minimum keeps the min1 index, later equal minima may
+      become min2;
+    * normalization is truncating floor(selected_min * 3 / 4);
+    * zero LLRs are hard bit 0.
+    """
 
     if iterations < 0:
         raise ValueError("iterations must be non-negative")
@@ -65,12 +72,15 @@ def decode_normalized_min_sum_fixed(
     channel = clip_signed(raw_channel, llr_width)
     lo, hi = signed_limits(message_width)
     saturation_count = int(np.count_nonzero(channel.astype(np.int64) != raw_channel.astype(np.int64)))
+    if alpha_num != 3 or alpha_den != 4:
+        raise ValueError("the RTL-equivalent model currently supports only 3/4 normalization")
+
     h = ar4ja.build_h_full_sparse()
     row_to_cols = h.row_to_cols
-    col_to_rows = h.col_to_rows
-
-    v_to_c = {(r, c): int(channel[c]) for r, cols in enumerate(row_to_cols) for c in cols}
-    c_to_v = {(r, c): 0 for r, cols in enumerate(row_to_cols) for c in cols}
+    check_messages = [
+        [0 for _ in cols]
+        for cols in row_to_cols
+    ]
     posterior = channel.astype(np.int16).copy()
     hard = hard_decision_from_llr(posterior)
     syndrome = ar4ja.syndrome_full(hard)
@@ -92,37 +102,43 @@ def decode_normalized_min_sum_fixed(
     for iteration in range(1, iterations + 1):
         used_iterations = iteration
         for row, cols in enumerate(row_to_cols):
-            values = [v_to_c[(row, col)] for col in cols]
-            signs = [1 if value >= 0 else -1 for value in values]
-            abs_values = [abs(value) for value in values]
-            sign_product = 1
-            for sign in signs:
-                sign_product *= sign
+            old_messages = check_messages[row]
+            q_values = [int(posterior[col]) - int(old_messages[idx]) for idx, col in enumerate(cols)]
+            sign_bits = [1 if value < 0 else 0 for value in q_values]
+            abs_values = [abs(value) for value in q_values]
+            sign_xor = 0
+            for sign in sign_bits:
+                sign_xor ^= sign
+
+            min1 = 1 << 30
+            min2 = 1 << 30
+            min1_idx = 0
+            for idx, abs_value in enumerate(abs_values):
+                if abs_value < min1:
+                    min2 = min1
+                    min1 = abs_value
+                    min1_idx = idx
+                elif abs_value < min2:
+                    min2 = abs_value
+
+            new_messages: list[int] = []
             for idx, col in enumerate(cols):
-                if len(abs_values) == 1:
-                    min_abs = 0
-                else:
-                    min_abs = min(abs_values[:idx] + abs_values[idx + 1 :])
-                value = sign_product * signs[idx] * min_abs
-                value = _norm_scale(value, alpha_num, alpha_den)
+                selected_min = min2 if idx == min1_idx else min1
+                scaled = selected_min * 3 // 4
+                value = -scaled if (sign_xor ^ sign_bits[idx]) else scaled
                 clipped, clipped_count = _clip_with_count(value, lo, hi)
-                c_to_v[(row, col)] = clipped
                 saturation_count += clipped_count
+                new_messages.append(clipped)
 
-        for col, rows in enumerate(col_to_rows):
-            total = int(channel[col])
-            for row in rows:
-                total += c_to_v[(row, col)]
-            clipped_total, clipped_count = _clip_with_count(total, lo, hi)
-            saturation_count += clipped_count
-            posterior[col] = clipped_total
-            for row in rows:
-                msg = clipped_total - c_to_v[(row, col)]
-                clipped_msg, clipped_count = _clip_with_count(msg, lo, hi)
-                v_to_c[(row, col)] = clipped_msg
+            for idx, col in enumerate(cols):
+                total = q_values[idx] + new_messages[idx]
+                clipped_total, clipped_count = _clip_with_count(total, lo, hi)
                 saturation_count += clipped_count
+                posterior[col] = clipped_total
+                hard[col] = 1 if clipped_total < 0 else 0
 
-        hard = hard_decision_from_llr(posterior)
+            check_messages[row] = new_messages
+
         syndrome = ar4ja.syndrome_full(hard)
         if int(syndrome.sum()) == 0:
             break

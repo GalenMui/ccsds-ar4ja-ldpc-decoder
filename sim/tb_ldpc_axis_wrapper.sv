@@ -117,12 +117,30 @@ module tb_ldpc_axis_wrapper;
 
     task automatic collect_good_output(input integer vector_idx, input integer stall_mode);
         reg [31:0] expected;
+        reg [31:0] stalled_data;
+        reg stalled_last;
+        reg stalled_active;
         begin
             word_idx = 0;
             wait_guard = 0;
-            while (word_idx < OUTPUT_WORDS && wait_guard < 30000) begin
+            stalled_data = 32'd0;
+            stalled_last = 1'b0;
+            stalled_active = 1'b0;
+            while (word_idx < OUTPUT_WORDS && wait_guard < 400000) begin
                 @(negedge clk);
                 m_axis_tready = (stall_mode == 0) ? 1'b1 : ((wait_guard % 5) != 2);
+                if (m_axis_tvalid && !m_axis_tready) begin
+                    if (stalled_active &&
+                        (m_axis_tdata !== stalled_data || m_axis_tlast !== stalled_last)) begin
+                        $display("FAIL axis vector=%0d stalled output changed word=%0d", vector_idx, word_idx);
+                        failures = failures + 1;
+                    end
+                    stalled_data = m_axis_tdata;
+                    stalled_last = m_axis_tlast;
+                    stalled_active = 1'b1;
+                end else begin
+                    stalled_active = 1'b0;
+                end
                 if (m_axis_tvalid && m_axis_tready) begin
                     expected = expected_output_word(vector_idx, word_idx);
                     if (word_idx == 4) begin
@@ -240,6 +258,12 @@ module tb_ldpc_axis_wrapper;
             drive_word(llr_vectors[0][word_idx * 32 +: 32], 1'b0, 0);
         end
         collect_error_output("missing_tlast", 1'b0, 1'b1);
+        word_idx = 0;
+        drive_word(32'hdead_beef, 1'b1, 0);
+
+        send_good_frame(0, 0);
+        $display("sent axis vector=0 after malformed frame");
+        collect_good_output(0, 0);
 
         if (failures != 0) begin
             $display("AXI wrapper simulation failed: %0d failures", failures);

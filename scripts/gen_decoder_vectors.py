@@ -69,7 +69,9 @@ def _make_vector(name: str, payload: np.ndarray, llr: np.ndarray) -> DecoderVect
     # Bounds are intentionally loose: the testbench checks that the serialized
     # core makes forward progress and finishes within a deterministic envelope.
     cycle_min = 0
-    cycle_max = 4 + MAX_ITERS * (ar4ja.CHECKS + ar4ja.FULL_N + 8)
+    init_cycles = ar4ja.PUNCTURED_N + (2 * ar4ja.CHECKS) + (ar4ja.INFO_N // 32)
+    row_cycles = (ar4ja.M * 13) + ((ar4ja.CHECKS - ar4ja.M) * 22)
+    cycle_max = init_cycles + MAX_ITERS * (row_cycles + ar4ja.CHECKS)
     return DecoderVector(
         name=name,
         payload=payload,

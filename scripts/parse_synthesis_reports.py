@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Parse synthesis reports when a synthesis flow exists.
+"""Parse synthesis reports when real synthesis reports are available.
 
-This repository does not yet include a Vivado/Yosys synthesis flow, so this
-script currently documents the missing input instead of inventing resource
-numbers.
+The repository includes synthesis templates, but this script still documents
+missing report input instead of inventing resource numbers.
 """
 
 from __future__ import annotations
@@ -31,4 +30,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

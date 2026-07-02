@@ -1,195 +1,195 @@
 # ccsds-ar4ja-ldpc-decoder
 
-Fixed-mode SystemVerilog/Python experiments for the CCSDS AR4JA LDPC code used
-by CCSDS 131.0-B-5, section 7.4.
+Synthesizable SystemVerilog and Python reference models for one fixed CCSDS
+AR4JA LDPC mode from CCSDS 131.0-B-5:
 
-This repository implements one mode only:
+- Code family: AR4JA LDPC
+- Rate: 1/2
+- k: 1024 information bits
+- Transmitted variables: 2048
+- Full internal variables: 2560
+- Punctured variables: 512, internal indices 2048..2559
+- Parity-check rows: 1536
 
-- Code family: CCSDS AR4JA LDPC.
-- Rate: 1/2.
-- CCSDS K: 2.
-- Submatrix size M: 512.
-- Information bits: 1024.
-- Transmitted codeword bits: 2048.
-- Full internal codeword bits: 2560.
-- Punctured bits: 512.
-- Parity-check rows: 1536.
+The RTL decoder is a row-serial, edge-serial layered normalized min-sum core.
+It is not a complete modem: synchronization, demodulation, packet parsing,
+multi-rate support, and board-specific constraints are outside this project.
 
-It is intended as an inspectable decoder design and verification sandbox, not
-as a complete spacecraft modem.
-
-## Scope
+## Architecture Status
 
 Implemented:
 
-- CCSDS AR4JA rate-1/2, k=1024 matrix construction from the CCSDS phi/theta
-  tables.
-- Explicit puncturing policy for the final M internal symbols.
-- Systematic Python encoder.
-- Floating-point and fixed-point normalized min-sum Python decoder models.
-- Deterministic vector generation.
-- Generated SystemVerilog graph package.
-- RTL syndrome checker.
-- Slow, deterministic RTL decoder core compared against the fixed-point Python
-  model at frame-output level.
-- AXI-style block wrapper and simulation testbench.
-- BER/FER smoke scripts and result summarization.
+- Fixed CCSDS AR4JA rate-1/2, k=1024 graph generation.
+- Python systematic encoder and fixed-point layered normalized min-sum model.
+- Generated `rtl/ar4ja_1024_pkg.sv` graph package.
+- Memory-based RTL decoder core with:
+  - synchronous posterior RAM, 2560 signed 8-bit entries;
+  - row-packed check-message RAM, 1536 x 48 bits;
+  - hard-decision vector updated during load and layered writeback;
+  - sequential punctured-variable initialization;
+  - sequential check-message clear;
+  - one check row active at a time and one posterior edge read/write at a time.
+- 32-bit AXI-Stream wrapper preserving the 512-word input and 40-word output ABI.
+- Board-facing `aclk`/`aresetn` wrapper for Vivado-style IP integration.
+- Icarus regression tests and board-independent DMA packing/parsing utility.
+- Vivado Tcl templates and an attempted Yosys flow.
 
-Not in scope:
+Current limitations:
 
-- Other CCSDS LDPC rates or block lengths.
-- CCSDS transfer-frame parsing, ASM/CSM handling, randomization, modulation, or
-  synchronization.
-- FPGA board bringup.
-- ASIC implementation flow.
-- Claimed timing closure, resource use, or production performance.
+- Only 3/4 normalization is implemented.
+- Only this CCSDS mode is supported.
+- No row or edge parallelism yet.
+- Vivado was not available in this environment, so vendor utilization/timing
+  were not measured.
+- The local Yosys build cannot parse the generated SystemVerilog package, so
+  generic synthesis is blocked by tool support here.
+
+## Fixed-Point Rules
+
+- Input/posterior LLR width: signed 8 bits.
+- Check-message width: signed 8 bits.
+- Positive posterior means hard bit 0.
+- Negative posterior means hard bit 1.
+- Zero ties to hard bit 0.
+- Punctured variables initialize to neutral LLR 0 and are decoded normally.
+- Layered row update:
+
+```text
+q_mj = L_j - R_mj_old
+R_mj_new = sign_excluding_edge * floor(selected_min * 3 / 4)
+L_j_new = q_mj + R_mj_new
+```
+
+Saturation events are counted only when clipping changes the mathematical value.
+
+## AXI-Stream ABI
+
+Input frame:
+
+- 512 words.
+- 32-bit `s_axis_tdata`.
+- Four signed int8 LLRs per word.
+- Lane ordering: bits `[7:0]` are the lowest codeword index in the word, then
+  `[15:8]`, `[23:16]`, `[31:24]`.
+- `s_axis_tlast` must be asserted on word 511.
+
+Output frame:
+
+```text
+word 0:  0x4C445043 ("LDPC")
+word 1:  decoder_success
+word 2:  syndrome_pass
+word 3:  iterations_used
+word 4:  cycles_elapsed
+word 5:  decoder_fail
+word 6:  saturation_count
+word 7:  reserved, zero
+word 8..39: decoded_bits[1023:0], 32 bits per word
+```
+
+## Cycle Counts
+
+Measured in RTL simulation for the core, excluding AXI input/output transfer:
+
+- Initial pass, all-zero valid frame: 3,616 cycles.
+- One layered iteration: 30,720 cycles.
+- Worst-case 8 iterations: 249,376 cycles.
+- Degree-3 row: 13 cycles.
+- Degree-6 row: 22 cycles.
+- Sequential syndrome pass: 1,536 cycles.
+
+These are functional simulation counts, not timing-closed FPGA results.
 
 ## Repository Structure
 
 ```text
-docs/        Mode, architecture, verification, results, and review notes
+docs/        Architecture, protocol, verification, and bring-up notes
+fpga/        Board-independent Vivado/Yosys synthesis templates
 models/      Python matrix, encoder, channel, quantization, and decoder models
-rtl/         SystemVerilog package, decoder, syndrome checker, and wrapper
+rtl/         SystemVerilog graph package, memories, core, and AXI wrappers
 sim/         Icarus testbenches
-scripts/     Generation, regression, smoke-test, plotting, and debug utilities
+scripts/     Generation, regression, DMA utility, and report scripts
 tests/       Python unit tests
-vectors/     Deterministic checked-in regression vectors
-results/     Local generated reports/plots; ignored except .gitkeep files
+vectors/     Deterministic regression and board-test vectors
+results/     Generated reports and plots
 ```
 
-The large generated RTL graph package `rtl/ar4ja_1024_pkg.sv` is intentional.
-Regenerate it with `python3 scripts/gen_syndrome_rom.py`.
-
-## Dependencies
-
-Python:
+`rtl/ar4ja_1024_pkg.sv` is generated. Regenerate it with:
 
 ```sh
-python3 -m pip install -r requirements.txt
+python3 scripts/gen_syndrome_rom.py
 ```
 
-Simulator:
-
-- `iverilog`
-- `vvp`
-
-`pytest` is listed in `requirements.txt`. If it is not importable, the
-Phase 1/3 runner uses a small local fallback for the plain pytest-style tests.
-
-## One Complete Run
-
-From the repository root:
+## Run Regression
 
 ```sh
 python3 scripts/run_regression.py
 ```
 
-The command prints each subcommand and a compact PASS/FAIL/SKIP summary. It
-creates `sim/build/` as needed.
-
 Useful Make targets:
 
 ```sh
-make help
 make test
 make regression
 make clean
 ```
 
-## Generate Vectors
-
-Syndrome checker vectors:
-
-```sh
-python3 scripts/gen_vectors.py
-```
-
-Decoder vectors:
+Direct decoder simulation:
 
 ```sh
 python3 scripts/gen_decoder_vectors.py
-```
-
-RTL graph package:
-
-```sh
-python3 scripts/gen_syndrome_rom.py
-```
-
-## Run Simulations Directly
-
-Syndrome checker:
-
-```sh
-python3 scripts/gen_vectors.py
-python3 scripts/gen_syndrome_rom.py
-iverilog -g2012 -o sim/build/syndrome_checker.vvp rtl/ar4ja_1024_pkg.sv rtl/syndrome_checker.sv sim/tb_syndrome_checker.sv
-vvp sim/build/syndrome_checker.vvp
-```
-
-Decoder core:
-
-```sh
-python3 scripts/gen_decoder_vectors.py
-iverilog -g2012 -o sim/build/ldpc_decoder_top.vvp rtl/ar4ja_1024_pkg.sv rtl/ldpc_decoder_top.sv sim/tb_ldpc_decoder_top.sv
+iverilog -g2012 -o sim/build/ldpc_decoder_top.vvp \
+  rtl/ar4ja_1024_pkg.sv rtl/posterior_memory.sv rtl/message_memory.sv \
+  rtl/ldpc_decoder_top.sv sim/tb_ldpc_decoder_top.sv
 vvp sim/build/ldpc_decoder_top.vvp
 ```
 
-AXI wrapper:
+Direct AXI simulation:
 
 ```sh
-iverilog -g2012 -o sim/build/ldpc_axis_wrapper.vvp rtl/ar4ja_1024_pkg.sv rtl/ldpc_decoder_top.sv rtl/ldpc_axis_wrapper.sv sim/tb_ldpc_axis_wrapper.sv
+iverilog -g2012 -o sim/build/ldpc_axis_wrapper.vvp \
+  rtl/ar4ja_1024_pkg.sv rtl/posterior_memory.sv rtl/message_memory.sv \
+  rtl/ldpc_decoder_top.sv rtl/ldpc_axis_wrapper.sv sim/tb_ldpc_axis_wrapper.sv
 vvp sim/build/ldpc_axis_wrapper.vvp
 ```
 
-## BER/FER Smoke And Plots
+## Synthesis
 
-Generate a small deterministic smoke CSV:
-
-```sh
-python3 scripts/run_ber_fer.py --frames 1 --ebn0 2.0
-python3 scripts/summarize_results.py
-```
-
-Generate plots when the local `matplotlib`/`numpy` installation is usable:
+Vivado out-of-context template:
 
 ```sh
-python3 scripts/plot_ber_fer.py
+vivado -mode batch -source fpga/synth_ooc.tcl -tclargs <fpga_part>
 ```
 
-Plots and CSVs under `results/` are generated artifacts. The deterministic
-regression vectors under `vectors/` are intentionally kept.
-
-## Debug Aids
-
-Matrix dimensions and graph statistics:
+or:
 
 ```sh
-python3 scripts/print_matrix_stats.py
+FPGA_PART=<fpga_part> vivado -mode batch -source fpga/synth_ooc.tcl
 ```
 
-List or inspect decoder vectors:
+The default clock constraint is 10 ns on `aclk` in
+`fpga/constraints/ldpc_axis_decoder.xdc`.
+
+## DMA Utility
+
+Pack 2048 signed int8 LLRs into 512 little-lane 32-bit words:
 
 ```sh
-python3 scripts/inspect_decoder_vector.py --list
-python3 scripts/inspect_decoder_vector.py 10
+python3 scripts/ldpc_dma_util.py pack llr.txt dma_input.bin
 ```
 
-## Current Status
+Parse a 40-word response:
 
-The core model, encoder, generated graph, syndrome checker, RTL decoder core,
-and AXI wrapper simulations pass in the current environment. The default
-regression skips plot generation only when `matplotlib.pyplot` cannot be
-imported cleanly.
+```sh
+python3 scripts/ldpc_dma_util.py parse dma_output.bin
+```
 
-No synthesis flow exists yet. No resource, timing, board, or hardware-readiness
-claims are made.
+See `vectors/board/zero_noiseless_axi_words.txt` for a compact known-good
+all-zero frame.
 
-Start deeper review with:
+## Start Reading
 
-- `docs/mode_spec.md`
 - `docs/architecture.md`
+- `docs/axi_protocol.md`
 - `docs/verification_plan.md`
-- `docs/results.md`
-- `docs/deep_dive_guide.md`
-- `docs/repo_status.md`
+- `docs/fpga_bringup.md`

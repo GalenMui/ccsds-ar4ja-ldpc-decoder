@@ -29,28 +29,44 @@ module ldpc_axis_wrapper #(
 
     localparam int LLR_PER_WORD = 32 / LLR_W;
     localparam int INPUT_WORDS = TX_N / LLR_PER_WORD;
-    localparam int OUTPUT_WORDS = 40;
+    localparam int INPUT_WORD_BITS = $clog2(INPUT_WORDS);
+    localparam int LANE_BITS = $clog2(LLR_PER_WORD);
+    localparam int PAYLOAD_OUTPUT_WORDS = K_BITS / 32;
+    localparam int OUTPUT_WORDS = 8 + PAYLOAD_OUTPUT_WORDS;
+    localparam int OUTPUT_WORD_BITS = $clog2(OUTPUT_WORDS);
 
     typedef enum logic [2:0] {
         W_IDLE,
-        W_LOAD,
+        W_UNPACK,
         W_START,
         W_DECODE,
-        W_OUTPUT
+        W_OUTPUT,
+        W_DRAIN
     } wrapper_state_t;
 
     wrapper_state_t state;
-    logic [TX_N*LLR_W-1:0] llr_flat;
-    logic decoder_start;
-    logic decoder_busy;
-    logic decoder_done;
-    logic [K_BITS-1:0] decoder_bits;
-    logic decoder_syndrome_pass;
-    logic decoder_success;
-    logic decoder_fail;
-    logic [$clog2(MAX_ITERS+1)-1:0] decoder_iterations;
-    logic [31:0] decoder_cycles;
-    logic [31:0] decoder_saturation;
+
+    logic [31:0] input_word_hold;
+    logic input_last_hold;
+    logic [INPUT_WORD_BITS-1:0] input_word_count;
+    logic [LANE_BITS-1:0] lane_count;
+    logic drain_after_output;
+
+    logic core_llr_write_valid;
+    logic core_llr_write_ready;
+    logic [$clog2(TX_N)-1:0] core_llr_write_addr;
+    logic signed [LLR_W-1:0] core_llr_write_data;
+    logic core_llr_load_clear;
+    logic core_start;
+    logic core_busy;
+    logic core_done;
+    logic [K_BITS-1:0] core_bits;
+    logic core_syndrome_pass;
+    logic core_success;
+    logic core_fail;
+    logic [$clog2(MAX_ITERS+1)-1:0] core_iterations;
+    logic [31:0] core_cycles;
+    logic [31:0] core_saturation;
 
     logic [K_BITS-1:0] out_bits;
     logic out_success;
@@ -59,35 +75,48 @@ module ldpc_axis_wrapper #(
     logic [31:0] out_iterations;
     logic [31:0] out_cycles;
     logic [31:0] out_saturation;
+    logic [OUTPUT_WORD_BITS-1:0] output_word_count;
 
-    integer input_word_count = 0;
-    logic [5:0] output_word_count = 6'd0;
-    integer lane;
-    integer llr_index;
+    assign s_axis_tready = (state == W_IDLE) || (state == W_DRAIN);
+    assign core_llr_write_valid = (state == W_UNPACK);
+    assign core_llr_write_addr =
+        (({{($clog2(TX_N)-INPUT_WORD_BITS){1'b0}}, input_word_count}) << LANE_BITS) +
+        {{($clog2(TX_N)-LANE_BITS){1'b0}}, lane_count};
+    assign core_llr_write_data = input_word_hold[lane_count * LLR_W +: LLR_W];
 
-    assign s_axis_tready = (state == W_IDLE || state == W_LOAD);
+    initial begin
+        if ((32 % LLR_W) != 0) $fatal(1, "LLR_W must divide the 32-bit AXI word");
+        if ((TX_N % LLR_PER_WORD) != 0) $fatal(1, "TX_N must be divisible by LLRs per AXI word");
+        if ((K_BITS % 32) != 0) $fatal(1, "K_BITS must be divisible by 32");
+    end
 
     ldpc_decoder_top #(
+        .TX_N(TX_N),
+        .K_BITS(K_BITS),
         .LLR_W(LLR_W),
         .MSG_W(MSG_W),
         .MAX_ITERS(MAX_ITERS)
     ) decoder (
         .clk(clk),
         .rst(rst),
-        .start(decoder_start),
-        .llr_in_flat(llr_flat),
-        .busy(decoder_busy),
-        .done(decoder_done),
-        .decoded_bits(decoder_bits),
-        .syndrome_pass(decoder_syndrome_pass),
-        .decoder_success(decoder_success),
-        .decoder_fail(decoder_fail),
-        .iterations_used(decoder_iterations),
-        .cycles_elapsed(decoder_cycles),
-        .saturation_count(decoder_saturation)
+        .llr_write_valid(core_llr_write_valid),
+        .llr_write_ready(core_llr_write_ready),
+        .llr_write_addr(core_llr_write_addr),
+        .llr_write_data(core_llr_write_data),
+        .llr_load_clear(core_llr_load_clear),
+        .start(core_start),
+        .busy(core_busy),
+        .done(core_done),
+        .decoded_bits(core_bits),
+        .syndrome_pass(core_syndrome_pass),
+        .decoder_success(core_success),
+        .decoder_fail(core_fail),
+        .iterations_used(core_iterations),
+        .cycles_elapsed(core_cycles),
+        .saturation_count(core_saturation)
     );
 
-    function automatic [31:0] output_word(input integer word_index);
+    function automatic [31:0] output_word(input logic [OUTPUT_WORD_BITS-1:0] word_index);
         begin
             case (word_index)
                 0: output_word = 32'h4c445043;
@@ -98,28 +127,12 @@ module ldpc_axis_wrapper #(
                 5: output_word = {31'd0, out_fail};
                 6: output_word = out_saturation;
                 7: output_word = 32'd0;
-                default: begin
-                    if (word_index >= 8 && word_index < OUTPUT_WORDS) begin
-                        output_word = out_bits[(word_index - 8) * 32 +: 32];
-                    end else begin
-                        output_word = 32'd0;
-                    end
-                end
+                default: output_word = out_bits[(word_index - 8) * 32 +: 32];
             endcase
         end
     endfunction
 
-    task automatic load_input_word(input integer word_index, input logic [31:0] word_data);
-        begin
-            for (lane = 0; lane < LLR_PER_WORD; lane = lane + 1) begin
-                llr_index = (word_index * LLR_PER_WORD) + lane;
-                // Lane 0 carries the lowest codeword index in the word.
-                llr_flat[llr_index*LLR_W +: LLR_W] <= word_data[lane*LLR_W +: LLR_W];
-            end
-        end
-    endtask
-
-    task automatic prepare_error_output;
+    task automatic prepare_error_output(input logic drain_after);
         begin
             out_bits <= '0;
             out_success <= 1'b0;
@@ -128,17 +141,24 @@ module ldpc_axis_wrapper #(
             out_iterations <= 32'd0;
             out_cycles <= 32'd0;
             out_saturation <= 32'd0;
-            output_word_count <= 0;
+            output_word_count <= '0;
+            m_axis_tvalid <= 1'b1;
+            m_axis_tdata <= 32'h4c445043;
+            m_axis_tlast <= (OUTPUT_WORDS == 1);
+            drain_after_output <= drain_after;
         end
     endtask
 
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
             state <= W_IDLE;
-            llr_flat <= '0;
-            decoder_start <= 1'b0;
-            input_word_count <= 0;
-            output_word_count <= 0;
+            input_word_hold <= 32'd0;
+            input_last_hold <= 1'b0;
+            input_word_count <= '0;
+            lane_count <= '0;
+            drain_after_output <= 1'b0;
+            core_llr_load_clear <= 1'b0;
+            core_start <= 1'b0;
             frame_error <= 1'b0;
             early_tlast_error <= 1'b0;
             missing_tlast_error <= 1'b0;
@@ -149,86 +169,88 @@ module ldpc_axis_wrapper #(
             out_iterations <= 32'd0;
             out_cycles <= 32'd0;
             out_saturation <= 32'd0;
+            output_word_count <= '0;
             m_axis_tvalid <= 1'b0;
             m_axis_tdata <= 32'd0;
             m_axis_tlast <= 1'b0;
         end else begin
-            decoder_start <= 1'b0;
+            core_start <= 1'b0;
+            core_llr_load_clear <= 1'b0;
 
             case (state)
                 W_IDLE: begin
                     m_axis_tvalid <= 1'b0;
                     m_axis_tlast <= 1'b0;
-                    frame_error <= 1'b0;
-                    early_tlast_error <= 1'b0;
-                    missing_tlast_error <= 1'b0;
-                    input_word_count <= 0;
-                    output_word_count <= 0;
+                    output_word_count <= '0;
                     if (s_axis_tvalid && s_axis_tready) begin
-                        load_input_word(0, s_axis_tdata);
-                        input_word_count <= 1;
-                        if (s_axis_tlast) begin
+                        frame_error <= 1'b0;
+                        early_tlast_error <= 1'b0;
+                        missing_tlast_error <= 1'b0;
+                        input_word_hold <= s_axis_tdata;
+                        input_last_hold <= s_axis_tlast;
+                        lane_count <= '0;
+                        if (s_axis_tlast && input_word_count != INPUT_WORDS - 1) begin
                             frame_error <= 1'b1;
                             early_tlast_error <= 1'b1;
-                            prepare_error_output();
-                            m_axis_tvalid <= 1'b1;
-                            m_axis_tdata <= 32'h4c445043;
-                            m_axis_tlast <= 1'b0;
+                            core_llr_load_clear <= 1'b1;
+                            prepare_error_output(1'b0);
                             state <= W_OUTPUT;
                         end else begin
-                            state <= W_LOAD;
+                            state <= W_UNPACK;
                         end
                     end
                 end
 
-                W_LOAD: begin
-                    if (s_axis_tvalid && s_axis_tready) begin
-                        load_input_word(input_word_count, s_axis_tdata);
-                        if (input_word_count == INPUT_WORDS - 1) begin
-                            if (s_axis_tlast) begin
-                                state <= W_START;
-                            end else begin
-                                frame_error <= 1'b1;
-                                missing_tlast_error <= 1'b1;
-                                prepare_error_output();
-                                m_axis_tvalid <= 1'b1;
-                                m_axis_tdata <= 32'h4c445043;
-                                m_axis_tlast <= 1'b0;
-                                state <= W_OUTPUT;
-                            end
-                        end else begin
-                            input_word_count <= input_word_count + 1;
-                            if (s_axis_tlast) begin
+                W_UNPACK: begin
+                    if (core_llr_write_ready) begin
+                        if (lane_count == LLR_PER_WORD - 1) begin
+                            lane_count <= '0;
+                            if (input_word_count == INPUT_WORDS - 1) begin
+                                if (input_last_hold) begin
+                                    state <= W_START;
+                                end else begin
+                                    frame_error <= 1'b1;
+                                    missing_tlast_error <= 1'b1;
+                                    core_llr_load_clear <= 1'b1;
+                                    prepare_error_output(1'b1);
+                                    state <= W_OUTPUT;
+                                end
+                            end else if (input_last_hold) begin
                                 frame_error <= 1'b1;
                                 early_tlast_error <= 1'b1;
-                                prepare_error_output();
-                                m_axis_tvalid <= 1'b1;
-                                m_axis_tdata <= 32'h4c445043;
-                                m_axis_tlast <= 1'b0;
+                                core_llr_load_clear <= 1'b1;
+                                prepare_error_output(1'b0);
                                 state <= W_OUTPUT;
+                            end else begin
+                                input_word_count <= input_word_count + 1'b1;
+                                state <= W_IDLE;
                             end
+                        end else begin
+                            lane_count <= lane_count + 1'b1;
                         end
                     end
                 end
 
                 W_START: begin
-                    decoder_start <= 1'b1;
+                    input_word_count <= '0;
+                    core_start <= 1'b1;
                     state <= W_DECODE;
                 end
 
                 W_DECODE: begin
-                    if (decoder_done) begin
-                        out_bits <= decoder_bits;
-                        out_success <= decoder_success;
-                        out_syndrome_pass <= decoder_syndrome_pass;
-                        out_fail <= decoder_fail;
-                        out_iterations <= {{(32-$bits(decoder_iterations)){1'b0}}, decoder_iterations};
-                        out_cycles <= decoder_cycles;
-                        out_saturation <= decoder_saturation;
-                        output_word_count <= 0;
+                    if (core_done) begin
+                        out_bits <= core_bits;
+                        out_success <= core_success;
+                        out_syndrome_pass <= core_syndrome_pass;
+                        out_fail <= core_fail;
+                        out_iterations <= {{(32-$bits(core_iterations)){1'b0}}, core_iterations};
+                        out_cycles <= core_cycles;
+                        out_saturation <= core_saturation;
+                        output_word_count <= '0;
+                        drain_after_output <= 1'b0;
                         m_axis_tvalid <= 1'b1;
                         m_axis_tdata <= 32'h4c445043;
-                        m_axis_tlast <= 1'b0;
+                        m_axis_tlast <= (OUTPUT_WORDS == 1);
                         state <= W_OUTPUT;
                     end
                 end
@@ -236,19 +258,59 @@ module ldpc_axis_wrapper #(
                 W_OUTPUT: begin
                     if (m_axis_tvalid && m_axis_tready) begin
                         if (output_word_count == OUTPUT_WORDS - 1) begin
-                            output_word_count <= 0;
+                            output_word_count <= '0;
                             m_axis_tvalid <= 1'b0;
                             m_axis_tlast <= 1'b0;
-                            state <= W_IDLE;
+                            state <= drain_after_output ? W_DRAIN : W_IDLE;
                         end else begin
-                            output_word_count <= output_word_count + 1;
-                            m_axis_tdata <= output_word(output_word_count + 1);
-                            m_axis_tlast <= (output_word_count + 1 == OUTPUT_WORDS - 1);
+                            output_word_count <= output_word_count + 1'b1;
+                            m_axis_tdata <= output_word(output_word_count + 1'b1);
+                            m_axis_tlast <= (output_word_count + 1'b1 == OUTPUT_WORDS - 1);
                         end
                     end
+                end
+
+                W_DRAIN: begin
+                    if (s_axis_tvalid && s_axis_tready && s_axis_tlast) begin
+                        input_word_count <= '0;
+                        lane_count <= '0;
+                        drain_after_output <= 1'b0;
+                        core_llr_load_clear <= 1'b1;
+                        state <= W_IDLE;
+                    end
+                end
+
+                default: begin
+                    state <= W_IDLE;
                 end
             endcase
         end
     end
+
+`ifdef LDPC_ENABLE_ASSERTS
+    logic [31:0] stalled_tdata;
+    logic stalled_tlast;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            stalled_tdata <= 32'd0;
+            stalled_tlast <= 1'b0;
+        end else begin
+            if (m_axis_tvalid && !m_axis_tready) begin
+                if (stalled_tdata !== 32'd0 || stalled_tlast !== 1'b0) begin
+                    assert (m_axis_tdata == stalled_tdata);
+                    assert (m_axis_tlast == stalled_tlast);
+                end
+                stalled_tdata <= m_axis_tdata;
+                stalled_tlast <= m_axis_tlast;
+            end else begin
+                stalled_tdata <= 32'd0;
+                stalled_tlast <= 1'b0;
+            end
+            assert (!(m_axis_tlast && !m_axis_tvalid));
+            assert (!(core_start && frame_error));
+        end
+    end
+`endif
 
 endmodule

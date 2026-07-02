@@ -8,12 +8,16 @@ module tb_ldpc_decoder_top;
     localparam int LLR_W = DECODER_VECTOR_LLR_W;
     localparam int MSG_W = 8;
     localparam int MAX_ITERS = DECODER_VECTOR_MAX_ITERS;
-    localparam int TIMEOUT_CYCLES = 100000;
+    localparam int TIMEOUT_CYCLES = 400000;
 
     logic clk;
     logic rst;
     logic start;
-    logic [TX_N*LLR_W-1:0] llr_in_flat;
+    logic llr_write_valid;
+    logic llr_write_ready;
+    logic [$clog2(TX_N)-1:0] llr_write_addr;
+    logic signed [LLR_W-1:0] llr_write_data;
+    logic llr_load_clear;
     logic busy;
     logic done;
     logic [INFO_N-1:0] decoded_bits;
@@ -35,6 +39,7 @@ module tb_ldpc_decoder_top;
     logic [31:0] cycle_max_expected [0:DECODER_VECTOR_COUNT-1];
 
     integer vector_idx;
+    integer llr_idx;
     integer wait_cycles;
     integer failures;
 
@@ -45,8 +50,12 @@ module tb_ldpc_decoder_top;
     ) dut (
         .clk(clk),
         .rst(rst),
+        .llr_write_valid(llr_write_valid),
+        .llr_write_ready(llr_write_ready),
+        .llr_write_addr(llr_write_addr),
+        .llr_write_data(llr_write_data),
+        .llr_load_clear(llr_load_clear),
         .start(start),
-        .llr_in_flat(llr_in_flat),
         .busy(busy),
         .done(done),
         .decoded_bits(decoded_bits),
@@ -59,6 +68,27 @@ module tb_ldpc_decoder_top;
     );
 
     always #5 clk = ~clk;
+
+    task automatic write_llr(input integer index, input logic signed [LLR_W-1:0] value);
+        integer ready_wait;
+        begin
+            @(negedge clk);
+            llr_write_addr = index[$clog2(TX_N)-1:0];
+            llr_write_data = value;
+            llr_write_valid = 1'b1;
+            ready_wait = 0;
+            do begin
+                @(posedge clk);
+                ready_wait = ready_wait + 1;
+                if (ready_wait > 16) begin
+                    $display("FAIL vector=%0d LLR load timeout index=%0d", vector_idx, index);
+                    $fatal(1);
+                end
+            end while (!llr_write_ready);
+            @(negedge clk);
+            llr_write_valid = 1'b0;
+        end
+    endtask
 
     initial begin
         $readmemh("vectors/decoder/llr.mem", llr_vectors);
@@ -74,15 +104,21 @@ module tb_ldpc_decoder_top;
         clk = 1'b0;
         rst = 1'b1;
         start = 1'b0;
-        llr_in_flat = '0;
+        llr_write_valid = 1'b0;
+        llr_write_addr = '0;
+        llr_write_data = '0;
+        llr_load_clear = 1'b0;
         failures = 0;
 
         repeat (4) @(posedge clk);
         rst = 1'b0;
 
         for (vector_idx = 0; vector_idx < DECODER_VECTOR_COUNT; vector_idx = vector_idx + 1) begin
+            for (llr_idx = 0; llr_idx < TX_N; llr_idx = llr_idx + 1) begin
+                write_llr(llr_idx, llr_vectors[vector_idx][llr_idx * LLR_W +: LLR_W]);
+            end
+
             @(posedge clk);
-            llr_in_flat = llr_vectors[vector_idx];
             start = 1'b1;
             @(posedge clk);
             start = 1'b0;
@@ -147,4 +183,3 @@ module tb_ldpc_decoder_top;
     end
 
 endmodule
-

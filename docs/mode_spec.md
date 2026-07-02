@@ -1,39 +1,52 @@
 # Fixed CCSDS AR4JA Mode Specification
 
-## Source
+## Standards Source
 
-Primary source: CCSDS 131.0-B-5, TM Synchronization and Channel Coding,
-September 2023, https://ccsds.org/Pubs/131x0b5.pdf.
+Primary source: CCSDS 131.0-B-5, *TM Synchronization and Channel Coding*,
+September 2023:
 
-Pages used:
+```text
+https://ccsds.org/Pubs/131x0b5.pdf
+```
 
-- Printed page 1-7: bit numbering convention.
-- Printed pages 7-7 through 7-11: LDPC AR4JA matrix, permutation formula,
-  phi tables, puncturing, and generator-matrix construction.
+Relevant printed pages:
+
+- Page 1-7: bit numbering convention.
+- Pages 7-7 through 7-8: AR4JA LDPC family, M table, rate-1/2 H matrix, and
+  permutation formula.
+- Pages 7-9 through 7-10: theta/phi tables 7-3 and 7-4.
+- Page 7-11: K values, generator matrix dimensions, codeword length table, and
+  last-M-column puncturing.
+
+The implementation is traceable through:
+
+- `models/ar4ja_matrix.py`: constants, theta/phi tables, permutation formula,
+  and H construction.
+- `scripts/gen_syndrome_rom.py`: generated RTL graph package from the Python H.
+- `rtl/ar4ja_1024_pkg.sv`: generated constants used by RTL.
 
 ## Supported Mode
 
-This repository implements only the fixed rate-1/2 AR4JA LDPC mode with:
+Only this fixed mode is implemented:
 
-- K = 2.
-- M = 512.
-- Information length k = M*K = 1024 bits.
-- Full unpunctured codeword length = M*(K+3) = 2560 bits.
-- Transmitted codeword length n = M*(K+2) = 2048 bits.
-- Punctured symbols = M = 512 bits.
-- Parity-check row count = 3*M = 1536 rows.
+| Quantity | Value |
+| --- | ---: |
+| Code family | AR4JA LDPC |
+| Rate | 1/2 |
+| CCSDS K | 2 |
+| M | 512 |
+| Information bits, `MK` | 1024 |
+| Full internal bits, `M(K+3)` | 2560 |
+| Transmitted bits, `M(K+2)` | 2048 |
+| Punctured bits | 512 |
+| Parity-check rows, `3M` | 1536 |
 
-## Bit Ordering
+`models/ar4ja_matrix.validate_dimensions()` checks these constants.
 
-Python index 0 and RTL bit 0 represent CCSDS Bit 0. Bit 0 is the first
-transmitted bit. When a CCSDS binary value is interpreted numerically, Bit 0 is
-the MSB. Text vector files write bit index 0 first; simulator memory files are
-hex-encoded so that bit index 0 maps to RTL bit 0.
+## H Matrix
 
-## Rate-1/2 H Matrix
-
-The full unpunctured parity-check matrix has 3 row blocks and 5 column blocks,
-each block M by M:
+The unpunctured rate-1/2 parity-check matrix has 3 row blocks and 5 column
+blocks, each M by M:
 
 ```text
 H_1/2 =
@@ -44,40 +57,66 @@ H_1/2 =
 
 All additions are over GF(2), so duplicate one entries cancel.
 
-The permutation matrix Pi_k has one entry in row i and column pi_k(i):
+This is not a placeholder matrix. The sparse rows are built from the CCSDS
+block formula and the embedded CCSDS theta/phi tables. For this fixed mode the
+generated graph has 7680 edges, row weight histogram `3:512, 6:1024`, and
+column weight histogram `1:512, 2:512, 3:1024, 6:512`.
+
+## Phi Table Indexing
+
+CCSDS tables 7-3 and 7-4 list phi values as 7-tuples ordered by:
+
+```text
+M = {128, 256, 512, 1024, 2048, 4096, 8192}
+```
+
+This repository uses the third tuple element because M = 512.
+
+## Permutation Formula
+
+For permutation matrix `Pi_k`, row `i` has a one at column `pi_k(i)`:
 
 ```text
 pi_k(i) = (M/4) * ((theta_k + floor(4*i/M)) mod 4)
         + (phi_k(floor(4*i/M), M) + i) mod (M/4)
 ```
 
-The tuple order for phi table values is M = {128, 256, 512, 1024, 2048, 4096,
-8192}. This fixed mode uses the third value in each tuple, because M = 512.
+Python index 0 corresponds to the CCSDS row/column index 0 used in this
+formula.
 
-## Puncturing
+## Puncturing Convention
 
-The last M full-codeword columns, full indices 2048..2559, are punctured and
-are not transmitted. The transmitted codeword contains full indices 0..2047.
-
-The Python and RTL transmitted-codeword syndrome convention is explicit:
-`solve_from_third_check_block`. Because the third H row block has I in the last
-punctured column block, each missing bit 2048+i is reconstructed as the XOR of
-the transmitted bits in check row 1024+i. This forces the third check block to
-zero without assuming the punctured bits were transmitted as zeros. The full
-1536-bit syndrome is then evaluated on that reconstructed full word.
-
-## Encoder
-
-The encoder is systematic. The full codeword order is:
+The full internal codeword order is:
 
 ```text
 [u0, u1, p0, p1, p2]
 ```
 
-where u0 and u1 are the two 512-bit information blocks and p2 is the punctured
-512-bit parity block.
+Each block is 512 bits. The transmitted codeword is:
 
-The standard construction partitions H as:
+```text
+[u0, u1, p0, p1]
+```
+
+Full internal columns `2048..2559`, the `p2` block, are punctured and are not
+transmitted.
+
+For syndrome checking from a transmitted 2048-bit word, the repository uses the
+explicit policy `solve_from_third_check_block`: for each `i`, reconstruct
+punctured bit `2048+i` from row `1024+i`, whose final H block is `I`. This
+forces the third check block to zero without pretending the punctured symbols
+were transmitted as zeros. The full 1536-row syndrome is then evaluated.
+
+For iterative decoding, punctured variables are included in the 2560-variable
+graph with neutral channel LLR = 0.
+
+## Encoder Convention
+
+The encoder is systematic. Payload bits occupy transmitted indices `0..1023`.
+Parity blocks `p0` and `p1` occupy transmitted indices `1024..2047`.
+
+The implementation follows the CCSDS generator construction specialized to the
+fixed rate-1/2 matrix:
 
 ```text
 P = last 3M columns of H
@@ -86,36 +125,39 @@ W = (P^-1 Q)^T over GF(2)
 G = [I_MK W]
 ```
 
-The implementation solves the equivalent fixed-mode GF(2) equations from this
-P/Q partition and then transmits `[u0, u1, p0, p1]`.
+The last M columns of `G`, corresponding to `p2`, are punctured.
 
-## LLR Convention
+## LLR And Fixed-Point Convention
 
-LLRs use positive values for bit 0 and negative values for bit 1. Quantized LLRs
-are signed two's-complement integers, default width 8 bits, saturated to
-[-128, 127]. An LLR exactly equal to zero is a stable tie and maps to hard
-decision 0.
+LLR sign:
 
-The BPSK model maps bit 0 to +1 and bit 1 to -1, matching the LLR sign
-convention.
+- Positive LLR means hard decision bit 0.
+- Negative LLR means hard decision bit 1.
+- Exactly zero is a stable tie and maps to bit 0.
 
-## Implemented Scope
+BPSK mapping:
 
-Implemented in Phases 1 through 3:
+- Bit 0 maps to `+1`.
+- Bit 1 maps to `-1`.
 
-- CCSDS AR4JA rate-1/2, k=1024 matrix construction.
-- Sparse row and column adjacency.
-- Full and transmitted-codeword syndrome calculations.
-- Systematic Python encoder and deterministic vectors.
-- Fixed-point LLR quantization and BPSK/AWGN helpers.
-- Simple floating-point and fixed-point normalized min-sum model scaffolds.
-- Generated SystemVerilog syndrome-checker constants.
-- Synthesizable RTL syndrome checker and Icarus simulation testbench.
+Default quantization:
 
-Intentionally not implemented yet:
+- LLR width: 8 signed bits.
+- Message width: 8 signed bits.
+- Signed saturation range: `[-128, 127]`.
+- Normalized min-sum scale: `3/4`.
 
-- Full iterative RTL decoder core.
-- AXI-Stream wrapper.
-- FPGA board bringup.
-- Other CCSDS LDPC rates, lengths, or modem functions.
+Python and RTL both saturate check-to-variable messages, posterior LLRs, and
+variable-to-check messages to the signed message range. The RTL decoder
+testbench compares saturation counts against Python-generated vectors.
 
+## Bit Ordering
+
+Python index 0 and RTL bit 0 represent CCSDS Bit 0. Bit 0 is the first
+transmitted bit. When a CCSDS binary field is interpreted numerically, Bit 0 is
+the MSB.
+
+Text vector files write bit index 0 first. Hex memory files pack bit or LLR
+index 0 into the least significant bits of the memory word because that is how
+the RTL vectors are indexed. This packing convention is tested by the syndrome
+and decoder testbenches.
