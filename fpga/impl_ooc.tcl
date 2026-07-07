@@ -10,7 +10,7 @@ if {[llength $argv] > 0} {
     exit 2
 }
 
-set build_dir [file join $repo_root results vivado_ooc synth]
+set build_dir [file join $repo_root results vivado_ooc impl]
 file mkdir $build_dir
 
 set source_manifest [file join $repo_root rtl ldpc_sources.f]
@@ -30,11 +30,14 @@ close $source_fh
 read_xdc [file join $repo_root fpga constraints ldpc_axis_decoder.xdc]
 
 synth_design -top ldpc_axis_decoder_ip -part $part -mode out_of_context
+opt_design
+place_design
+route_design
 
-report_utilization -file [file join $build_dir utilization_synth.rpt]
-report_timing_summary -file [file join $build_dir timing_summary_synth.rpt]
+report_utilization -file [file join $build_dir utilization_impl.rpt]
+report_timing_summary -file [file join $build_dir timing_summary_impl.rpt]
 report_ram_utilization -file [file join $build_dir ram_utilization.rpt]
 report_hierarchy -file [file join $build_dir hierarchy.rpt]
-report_compile_order -fileset sources_1 -file [file join $build_dir compile_order.rpt]
+report_route_status -file [file join $build_dir route_status.rpt]
 report_drc -file [file join $build_dir drc.rpt]
-write_checkpoint -force [file join $build_dir ldpc_axis_decoder_ip.dcp]
+write_checkpoint -force [file join $build_dir ldpc_axis_decoder_ip_routed.dcp]

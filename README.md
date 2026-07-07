@@ -11,7 +11,9 @@ AR4JA LDPC mode from CCSDS 131.0-B-5:
 - Punctured variables: 512, internal indices 2048..2559
 - Parity-check rows: 1536
 
-The RTL decoder is a row-serial, edge-serial layered normalized min-sum core.
+The RTL decoder is a partially parallel layered normalized min-sum core. The
+default configuration processes 8 independent check rows per schedule group;
+`LANES=1` and `LANES=16` are also generated and regression-tested.
 It is not a complete modem: synchronization, demodulation, packet parsing,
 multi-rate support, and board-specific constraints are outside this project.
 
@@ -23,14 +25,17 @@ Implemented:
 - Python systematic encoder and fixed-point layered normalized min-sum model.
 - Generated `rtl/ar4ja_1024_pkg.sv` graph package.
 - Memory-based RTL decoder core with:
-  - synchronous posterior RAM, 2560 signed 8-bit entries;
-  - row-packed check-message RAM, 1536 x 48 bits;
+  - banked synchronous posterior RAM, 2560 signed 8-bit entries total;
+  - lane-banked row-packed check-message RAM, 1536 x 48 bits total;
   - hard-decision vector updated during load and layered writeback;
-  - sequential punctured-variable initialization;
-  - sequential check-message clear;
-  - one check row active at a time and one posterior edge read/write at a time.
+  - bank-parallel punctured-variable initialization;
+  - bank-parallel check-message clear;
+  - generated conflict-free row groups for `LANES=1`, `LANES=8`, and
+    `LANES=16`.
 - 32-bit AXI-Stream wrapper preserving the 512-word input and 40-word output ABI.
 - Board-facing `aclk`/`aresetn` wrapper for Vivado-style IP integration.
+- Explicit AXI4-Stream `TKEEP` handling for AXI DMA integration.
+- Tcl-based PYNQ-Z2 Vivado block-design flow and PYNQ host software.
 - Icarus regression tests and board-independent DMA packing/parsing utility.
 - Vivado Tcl templates and an attempted Yosys flow.
 
@@ -38,7 +43,9 @@ Current limitations:
 
 - Only 3/4 normalization is implemented.
 - Only this CCSDS mode is supported.
-- No row or edge parallelism yet.
+- `LANES=8` is the production default. `LANES=16` compiles and passes the
+  deterministic RTL vector regression in this environment, but vendor timing
+  and resource use are not yet measured.
 - Vivado was not available in this environment, so vendor utilization/timing
   were not measured.
 - The local Yosys build cannot parse the generated SystemVerilog package, so
@@ -68,6 +75,7 @@ Input frame:
 
 - 512 words.
 - 32-bit `s_axis_tdata`.
+- `s_axis_tkeep` must be `4'hf` on every accepted word.
 - Four signed int8 LLRs per word.
 - Lane ordering: bits `[7:0]` are the lowest codeword index in the word, then
   `[15:8]`, `[23:16]`, `[31:24]`.
@@ -87,16 +95,22 @@ word 7:  reserved, zero
 word 8..39: decoded_bits[1023:0], 32 bits per word
 ```
 
+`m_axis_tkeep` is `4'hf` on every valid output word. `m_axis_tlast` is asserted
+only on output word 39.
+
 ## Cycle Counts
 
 Measured in RTL simulation for the core, excluding AXI input/output transfer:
 
-- Initial pass, all-zero valid frame: 3,616 cycles.
-- One layered iteration: 30,720 cycles.
-- Worst-case 8 iterations: 249,376 cycles.
-- Degree-3 row: 13 cycles.
-- Degree-6 row: 22 cycles.
-- Sequential syndrome pass: 1,536 cycles.
+- `LANES=8` default: initial pass 480 cycles; one layered iteration 3,840
+  cycles; worst-case 8 iterations 31,200 cycles.
+- `LANES=16`: initial pass 256 cycles; one layered iteration 1,920 cycles;
+  worst-case 8 iterations 15,616 cycles.
+- `LANES=1`: initial pass 3,616 cycles; one layered iteration 30,720 cycles;
+  worst-case 8 iterations 249,376 cycles.
+- Degree-3 group: 13 cycles.
+- Degree-6 group: 22 cycles.
+- Syndrome pass: `1536 / LANES` cycles.
 
 These are functional simulation counts, not timing-closed FPGA results.
 
@@ -123,14 +137,23 @@ python3 scripts/gen_syndrome_rom.py
 ## Run Regression
 
 ```sh
-python3 scripts/run_regression.py
+make test
 ```
 
 Useful Make targets:
 
 ```sh
+make generate
+make lint
 make test
 make regression
+make synth FPGA_PART=<part>
+make impl FPGA_PART=<part>
+make package-ip FPGA_PART=<part>
+make pynq-z2-project
+make pynq-z2-synth
+make pynq-z2-bitstream
+make pynq-z2-overlay
 make clean
 ```
 
@@ -139,7 +162,8 @@ Direct decoder simulation:
 ```sh
 python3 scripts/gen_decoder_vectors.py
 iverilog -g2012 -o sim/build/ldpc_decoder_top.vvp \
-  rtl/ar4ja_1024_pkg.sv rtl/posterior_memory.sv rtl/message_memory.sv \
+  rtl/ar4ja_1024_pkg.sv rtl/ldpc_schedule_pkg.sv \
+  rtl/posterior_memory.sv rtl/message_memory.sv \
   rtl/ldpc_decoder_top.sv sim/tb_ldpc_decoder_top.sv
 vvp sim/build/ldpc_decoder_top.vvp
 ```
@@ -148,7 +172,8 @@ Direct AXI simulation:
 
 ```sh
 iverilog -g2012 -o sim/build/ldpc_axis_wrapper.vvp \
-  rtl/ar4ja_1024_pkg.sv rtl/posterior_memory.sv rtl/message_memory.sv \
+  rtl/ar4ja_1024_pkg.sv rtl/ldpc_schedule_pkg.sv \
+  rtl/posterior_memory.sv rtl/message_memory.sv \
   rtl/ldpc_decoder_top.sv rtl/ldpc_axis_wrapper.sv sim/tb_ldpc_axis_wrapper.sv
 vvp sim/build/ldpc_axis_wrapper.vvp
 ```
@@ -158,17 +183,46 @@ vvp sim/build/ldpc_axis_wrapper.vvp
 Vivado out-of-context template:
 
 ```sh
-vivado -mode batch -source fpga/synth_ooc.tcl -tclargs <fpga_part>
+make synth FPGA_PART=<fpga_part>
 ```
 
-or:
+Implementation and IP packaging:
 
 ```sh
-FPGA_PART=<fpga_part> vivado -mode batch -source fpga/synth_ooc.tcl
+make impl FPGA_PART=<fpga_part>
+make package-ip FPGA_PART=<fpga_part>
 ```
 
 The default clock constraint is 10 ns on `aclk` in
 `fpga/constraints/ldpc_axis_decoder.xdc`.
+
+## PYNQ-Z2 Overlay
+
+First-board integration targets the TUL PYNQ-Z2
+(`xc7z020clg400-1`) using PS DDR, AXI DMA, and the existing
+`ldpc_axis_decoder_ip` stream interface:
+
+```sh
+make pynq-z2-project
+make pynq-z2-synth
+make pynq-z2-bitstream
+make pynq-z2-overlay
+```
+
+The packaged overlay appears under:
+
+```text
+results/pynq_z2/overlay/
+```
+
+Copy that directory to the board and run:
+
+```sh
+python3 smoke_test.py
+python3 benchmark.py --frames 10
+```
+
+See `docs/PYNQ_Z2.md` and `docs/BOARD_READINESS_AUDIT.md`.
 
 ## DMA Utility
 
@@ -189,7 +243,11 @@ all-zero frame.
 
 ## Start Reading
 
-- `docs/architecture.md`
-- `docs/axi_protocol.md`
-- `docs/verification_plan.md`
-- `docs/fpga_bringup.md`
+- `docs/ARCHITECTURE.md`
+- `docs/STREAM_PROTOCOL.md`
+- `docs/VERIFICATION.md`
+- `docs/SYNTHESIS.md`
+- `docs/BOARD_BRINGUP.md`
+- `docs/PYNQ_Z2.md`
+- `docs/BOARD_READINESS_AUDIT.md`
+- `docs/REPO_STATUS.md`

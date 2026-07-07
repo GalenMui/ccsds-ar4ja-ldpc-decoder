@@ -12,6 +12,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD_DIR = ROOT / "sim" / "build"
+DECODER_RTL = [
+    "rtl/ar4ja_1024_pkg.sv",
+    "rtl/ldpc_schedule_pkg.sv",
+    "rtl/posterior_memory.sv",
+    "rtl/message_memory.sv",
+    "rtl/ldpc_decoder_top.sv",
+    "sim/tb_ldpc_decoder_top.sv",
+]
 
 
 @dataclass(frozen=True)
@@ -87,6 +95,7 @@ def main() -> int:
 
     steps: list[Step] = [
         Step("phase1_phase3", [py, "scripts/run_phase1_phase3_tests.py"]),
+        Step("parallel_schedule", [py, "scripts/gen_parallel_schedule.py"]),
         Step("decoder_vectors", [py, "scripts/gen_decoder_vectors.py"]),
         Step("decoder_check", [py, "scripts/check_decoder_output.py"]),
         Step(
@@ -96,15 +105,49 @@ def main() -> int:
                 "-g2012",
                 "-o",
                 "sim/build/ldpc_decoder_top.vvp",
-                "rtl/ar4ja_1024_pkg.sv",
-                "rtl/posterior_memory.sv",
-                "rtl/message_memory.sv",
-                "rtl/ldpc_decoder_top.sv",
-                "sim/tb_ldpc_decoder_top.sv",
+                *DECODER_RTL,
             ],
             tools=("iverilog",),
         ),
         Step("decoder_sim", ["vvp", "sim/build/ldpc_decoder_top.vvp"], timeout=60, tools=("vvp",)),
+        Step(
+            "decoder_lanes1_build",
+            [
+                "iverilog",
+                "-g2012",
+                "-P",
+                "tb_ldpc_decoder_top.LANES=1",
+                "-o",
+                "sim/build/ldpc_decoder_top_lanes1.vvp",
+                *DECODER_RTL,
+            ],
+            tools=("iverilog",),
+        ),
+        Step(
+            "decoder_lanes1_sim",
+            ["vvp", "sim/build/ldpc_decoder_top_lanes1.vvp"],
+            timeout=180,
+            tools=("vvp",),
+        ),
+        Step(
+            "decoder_lanes16_build",
+            [
+                "iverilog",
+                "-g2012",
+                "-P",
+                "tb_ldpc_decoder_top.LANES=16",
+                "-o",
+                "sim/build/ldpc_decoder_top_lanes16.vvp",
+                *DECODER_RTL,
+            ],
+            tools=("iverilog",),
+        ),
+        Step(
+            "decoder_lanes16_sim",
+            ["vvp", "sim/build/ldpc_decoder_top_lanes16.vvp"],
+            timeout=120,
+            tools=("vvp",),
+        ),
         Step(
             "axis_build",
             [
@@ -113,6 +156,7 @@ def main() -> int:
                 "-o",
                 "sim/build/ldpc_axis_wrapper.vvp",
                 "rtl/ar4ja_1024_pkg.sv",
+                "rtl/ldpc_schedule_pkg.sv",
                 "rtl/posterior_memory.sv",
                 "rtl/message_memory.sv",
                 "rtl/ldpc_decoder_top.sv",
@@ -151,6 +195,8 @@ def main() -> int:
 
     required_pass = {
         "decoder_sim": "decoder_build",
+        "decoder_lanes1_sim": "decoder_lanes1_build",
+        "decoder_lanes16_sim": "decoder_lanes16_build",
         "axis_sim": "axis_build",
     }
 

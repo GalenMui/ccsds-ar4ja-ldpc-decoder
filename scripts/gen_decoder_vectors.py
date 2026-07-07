@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate deterministic vectors for the serialized RTL LDPC decoder."""
+"""Generate deterministic vectors for the scheduled RTL LDPC decoder."""
 
 from __future__ import annotations
 
@@ -66,8 +66,9 @@ def _noiseless_vector(name: str, payload: np.ndarray) -> tuple[np.ndarray, np.nd
 
 def _make_vector(name: str, payload: np.ndarray, llr: np.ndarray) -> DecoderVector:
     result = decode_normalized_min_sum_fixed(llr, iterations=MAX_ITERS)
-    # Bounds are intentionally loose: the testbench checks that the serialized
-    # core makes forward progress and finishes within a deterministic envelope.
+    # Bounds are intentionally loose so the same vectors can exercise LANES=1,
+    # LANES=8, and LANES=16 while still checking deterministic convergence and
+    # saturation metadata.
     cycle_min = 0
     init_cycles = ar4ja.PUNCTURED_N + (2 * ar4ja.CHECKS) + (ar4ja.INFO_N // 32)
     row_cycles = (ar4ja.M * 13) + ((ar4ja.CHECKS - ar4ja.M) * 22)

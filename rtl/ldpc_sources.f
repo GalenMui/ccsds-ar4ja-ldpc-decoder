@@ -1,4 +1,5 @@
 rtl/ar4ja_1024_pkg.sv
+rtl/ldpc_schedule_pkg.sv
 rtl/posterior_memory.sv
 rtl/message_memory.sv
 rtl/ldpc_decoder_top.sv

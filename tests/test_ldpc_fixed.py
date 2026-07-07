@@ -5,6 +5,7 @@ from models import bpsk_awgn
 from models import ldpc_encoder
 from models import llr_quant
 from models.ldpc_decoder_fixed import decode_normalized_min_sum_fixed
+from models.ldpc_schedule import SUPPORTED_LANES
 
 
 def test_llr_hard_decision_sign_and_zero_tie():
@@ -64,3 +65,37 @@ def test_low_confidence_failure_runs_to_max_iterations():
     assert not result.converged
     assert result.decoder_fail
     assert result.iterations == 8
+
+
+def test_parallel_schedules_match_row_serial_model():
+    rng = np.random.default_rng(11)
+    payload = rng.integers(0, 2, ar4ja.INFO_N, dtype=np.uint8)
+    tx = ldpc_encoder.encode(payload)
+    llr = bpsk_awgn.noiseless_llr(tx, magnitude=24.0)
+
+    baseline = decode_normalized_min_sum_fixed(llr, iterations=3, lanes=1)
+    for lanes in SUPPORTED_LANES:
+        result = decode_normalized_min_sum_fixed(llr, iterations=3, lanes=lanes)
+        assert result.iterations == baseline.iterations
+        assert result.converged == baseline.converged
+        assert result.saturation_count == baseline.saturation_count
+        assert np.array_equal(result.hard_full, baseline.hard_full)
+        assert np.array_equal(result.posterior_llr, baseline.posterior_llr)
+
+
+def test_parallel_trace_records_group_lane_and_edge_updates():
+    payload = np.zeros(ar4ja.INFO_N, dtype=np.uint8)
+    payload[0] = 1
+    tx = ldpc_encoder.encode(payload)
+    llr = bpsk_awgn.noiseless_llr(tx, magnitude=32.0)
+
+    result = decode_normalized_min_sum_fixed(llr, iterations=1, lanes=8, trace=True)
+
+    assert result.trace
+    first = result.trace[0]
+    assert first.iteration == 1
+    assert first.group == 0
+    assert first.lane == 0
+    assert first.row == 0
+    assert first.edge_slot == 0
+    assert first.variable == ar4ja.row_to_cols()[0][0]

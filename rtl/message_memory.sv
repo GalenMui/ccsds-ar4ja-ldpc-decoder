@@ -1,5 +1,7 @@
 `timescale 1ns/1ps
 
+// Reference single-port synchronous RAM template. The authoritative decoder
+// core currently infers its banked row-message RAMs internally.
 module message_memory #(
     parameter int ROWS = 1536,
     parameter int ROW_W = 48

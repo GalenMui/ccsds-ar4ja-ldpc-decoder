@@ -1,5 +1,7 @@
 `timescale 1ns/1ps
 
+// Reference single-port synchronous RAM template. The authoritative decoder
+// core currently infers its banked posterior RAMs internally.
 module posterior_memory #(
     parameter int DEPTH = 2560,
     parameter int DATA_W = 8

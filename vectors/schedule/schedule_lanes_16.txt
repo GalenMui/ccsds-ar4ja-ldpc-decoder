@@ -1,0 +1,14 @@
+lanes: 16
+groups: 96
+active rows: 1536
+average active lanes: 16.000
+lane utilization: 100.00%
+bubble lane slots: 0
+degree-3 rows: 512
+degree-6 rows: 1024
+groups limited by variable conflicts: 0
+groups limited by bank conflicts: 0
+row order: consecutive ascending rows, row = group * LANES + lane
+posterior bank map: bank = variable % LANES, address = variable / LANES
+check-message map: bank = lane, address = group
+edge ordering: authoritative row_col order is preserved

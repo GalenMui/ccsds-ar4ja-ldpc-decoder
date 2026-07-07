@@ -7,7 +7,8 @@ module ldpc_axis_wrapper #(
     parameter int K_BITS = ar4ja_1024_pkg::INFO_N,
     parameter int LLR_W = 8,
     parameter int MSG_W = 8,
-    parameter int MAX_ITERS = 8
+    parameter int MAX_ITERS = 8,
+    parameter int LANES = 8
 ) (
     input  logic clk,
     input  logic rst,
@@ -15,16 +16,19 @@ module ldpc_axis_wrapper #(
     input  logic        s_axis_tvalid,
     output logic        s_axis_tready,
     input  logic [31:0] s_axis_tdata,
+    input  logic [3:0]  s_axis_tkeep,
     input  logic        s_axis_tlast,
 
     output logic        m_axis_tvalid,
     input  logic        m_axis_tready,
     output logic [31:0] m_axis_tdata,
+    output logic [3:0]  m_axis_tkeep,
     output logic        m_axis_tlast,
 
     output logic        frame_error,
     output logic        early_tlast_error,
-    output logic        missing_tlast_error
+    output logic        missing_tlast_error,
+    output logic        tkeep_error
 );
 
     localparam int LLR_PER_WORD = 32 / LLR_W;
@@ -34,6 +38,7 @@ module ldpc_axis_wrapper #(
     localparam int PAYLOAD_OUTPUT_WORDS = K_BITS / 32;
     localparam int OUTPUT_WORDS = 8 + PAYLOAD_OUTPUT_WORDS;
     localparam int OUTPUT_WORD_BITS = $clog2(OUTPUT_WORDS);
+    localparam logic [3:0] KEEP_ALL = 4'hf;
 
     typedef enum logic [2:0] {
         W_IDLE,
@@ -95,7 +100,8 @@ module ldpc_axis_wrapper #(
         .K_BITS(K_BITS),
         .LLR_W(LLR_W),
         .MSG_W(MSG_W),
-        .MAX_ITERS(MAX_ITERS)
+        .MAX_ITERS(MAX_ITERS),
+        .LANES(LANES)
     ) decoder (
         .clk(clk),
         .rst(rst),
@@ -144,8 +150,12 @@ module ldpc_axis_wrapper #(
             output_word_count <= '0;
             m_axis_tvalid <= 1'b1;
             m_axis_tdata <= 32'h4c445043;
+            m_axis_tkeep <= KEEP_ALL;
             m_axis_tlast <= (OUTPUT_WORDS == 1);
             drain_after_output <= drain_after;
+            input_word_count <= '0;
+            lane_count <= '0;
+            input_last_hold <= 1'b0;
         end
     endtask
 
@@ -162,6 +172,7 @@ module ldpc_axis_wrapper #(
             frame_error <= 1'b0;
             early_tlast_error <= 1'b0;
             missing_tlast_error <= 1'b0;
+            tkeep_error <= 1'b0;
             out_bits <= '0;
             out_success <= 1'b0;
             out_syndrome_pass <= 1'b0;
@@ -172,6 +183,7 @@ module ldpc_axis_wrapper #(
             output_word_count <= '0;
             m_axis_tvalid <= 1'b0;
             m_axis_tdata <= 32'd0;
+            m_axis_tkeep <= 4'd0;
             m_axis_tlast <= 1'b0;
         end else begin
             core_start <= 1'b0;
@@ -186,10 +198,17 @@ module ldpc_axis_wrapper #(
                         frame_error <= 1'b0;
                         early_tlast_error <= 1'b0;
                         missing_tlast_error <= 1'b0;
+                        tkeep_error <= 1'b0;
                         input_word_hold <= s_axis_tdata;
                         input_last_hold <= s_axis_tlast;
                         lane_count <= '0;
-                        if (s_axis_tlast && input_word_count != INPUT_WORDS - 1) begin
+                        if (s_axis_tkeep != KEEP_ALL) begin
+                            frame_error <= 1'b1;
+                            tkeep_error <= 1'b1;
+                            core_llr_load_clear <= 1'b1;
+                            prepare_error_output(!s_axis_tlast);
+                            state <= W_OUTPUT;
+                        end else if (s_axis_tlast && input_word_count != INPUT_WORDS - 1) begin
                             frame_error <= 1'b1;
                             early_tlast_error <= 1'b1;
                             core_llr_load_clear <= 1'b1;
@@ -250,6 +269,7 @@ module ldpc_axis_wrapper #(
                         drain_after_output <= 1'b0;
                         m_axis_tvalid <= 1'b1;
                         m_axis_tdata <= 32'h4c445043;
+                        m_axis_tkeep <= KEEP_ALL;
                         m_axis_tlast <= (OUTPUT_WORDS == 1);
                         state <= W_OUTPUT;
                     end
@@ -260,11 +280,13 @@ module ldpc_axis_wrapper #(
                         if (output_word_count == OUTPUT_WORDS - 1) begin
                             output_word_count <= '0;
                             m_axis_tvalid <= 1'b0;
+                            m_axis_tkeep <= 4'd0;
                             m_axis_tlast <= 1'b0;
                             state <= drain_after_output ? W_DRAIN : W_IDLE;
                         end else begin
                             output_word_count <= output_word_count + 1'b1;
                             m_axis_tdata <= output_word(output_word_count + 1'b1);
+                            m_axis_tkeep <= KEEP_ALL;
                             m_axis_tlast <= (output_word_count + 1'b1 == OUTPUT_WORDS - 1);
                         end
                     end
@@ -289,25 +311,31 @@ module ldpc_axis_wrapper #(
 
 `ifdef LDPC_ENABLE_ASSERTS
     logic [31:0] stalled_tdata;
+    logic [3:0] stalled_tkeep;
     logic stalled_tlast;
 
-    always_ff @(posedge clk) begin
+    always @(posedge clk) begin
         if (rst) begin
             stalled_tdata <= 32'd0;
+            stalled_tkeep <= 4'd0;
             stalled_tlast <= 1'b0;
         end else begin
             if (m_axis_tvalid && !m_axis_tready) begin
-                if (stalled_tdata !== 32'd0 || stalled_tlast !== 1'b0) begin
+                if (stalled_tdata !== 32'd0 || stalled_tkeep !== 4'd0 || stalled_tlast !== 1'b0) begin
                     assert (m_axis_tdata == stalled_tdata);
+                    assert (m_axis_tkeep == stalled_tkeep);
                     assert (m_axis_tlast == stalled_tlast);
                 end
                 stalled_tdata <= m_axis_tdata;
+                stalled_tkeep <= m_axis_tkeep;
                 stalled_tlast <= m_axis_tlast;
             end else begin
                 stalled_tdata <= 32'd0;
+                stalled_tkeep <= 4'd0;
                 stalled_tlast <= 1'b0;
             end
             assert (!(m_axis_tlast && !m_axis_tvalid));
+            assert (!(m_axis_tvalid && m_axis_tkeep != KEEP_ALL));
             assert (!(core_start && frame_error));
         end
     end

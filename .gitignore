@@ -46,6 +46,9 @@ vsim.wlf
 .Xil/
 *.jou
 *.str
+# Staged PYNQ-Z2 bring-up flow outputs (scripts/vivado)
+build/vivado/
+reports/vivado/
 *.xpr
 *.runs/
 *.cache/
@@ -55,8 +58,10 @@ vsim.wlf
 *.srcs/
 *.sim/
 *.bit
+*.hwh
 *.ltx
 *.dcp
+*.xsa
 *.rpt
 
 # Logs

@@ -8,7 +8,27 @@ from typing import Sequence
 import numpy as np
 
 from . import ar4ja_matrix as ar4ja
+from .ldpc_schedule import Schedule, build_schedule
 from .llr_quant import LLR_WIDTH_DEFAULT, clip_signed, hard_decision_from_llr, signed_limits
+
+
+@dataclass(frozen=True)
+class FixedDecodeTraceEntry:
+    iteration: int
+    group: int
+    lane: int
+    row: int
+    edge_slot: int
+    variable: int
+    old_posterior: int
+    old_check_message: int
+    q: int
+    min1: int
+    min2: int
+    min1_index: int
+    new_check_message: int
+    new_posterior: int
+    hard_decision: int
 
 
 @dataclass(frozen=True)
@@ -22,6 +42,7 @@ class FixedDecodeResult:
     saturation_count: int = 0
     decoder_success: bool = False
     decoder_fail: bool = False
+    trace: tuple[FixedDecodeTraceEntry, ...] = ()
 
 
 def _full_llr(llr: Sequence[int] | np.ndarray) -> np.ndarray:
@@ -48,14 +69,17 @@ def decode_normalized_min_sum_fixed(
     alpha_den: int = 4,
     llr_width: int = LLR_WIDTH_DEFAULT,
     message_width: int = 8,
+    lanes: int = 1,
+    schedule: Schedule | None = None,
+    trace: bool = False,
 ) -> FixedDecodeResult:
-    """Decode with row-serial layered integer normalized min-sum.
+    """Decode with scheduled layered integer normalized min-sum.
 
     This model is intentionally bit-exact with the RTL baseline:
 
     * transmitted LLRs initialize variables 0..2047;
     * punctured variables 2048..2559 initialize to neutral zero;
-    * each check row is processed in ascending row order;
+    * check rows are processed by the generated schedule;
     * q_mj = L_j - R_mj_old is kept only for the active row;
     * the first equal minimum keeps the min1 index, later equal minima may
       become min2;
@@ -67,6 +91,10 @@ def decode_normalized_min_sum_fixed(
         raise ValueError("iterations must be non-negative")
     if alpha_num <= 0 or alpha_den <= 0:
         raise ValueError("normalization ratio must be positive")
+    if schedule is None:
+        schedule = build_schedule(lanes)
+    elif schedule.lanes != lanes:
+        raise ValueError(f"schedule lanes {schedule.lanes} != requested lanes {lanes}")
 
     raw_channel = _full_llr(llr)
     channel = clip_signed(raw_channel, llr_width)
@@ -96,48 +124,133 @@ def decode_normalized_min_sum_fixed(
             saturation_count,
             converged,
             not converged,
+            (),
         )
 
     used_iterations = 0
+    trace_entries: list[FixedDecodeTraceEntry] = []
     for iteration in range(1, iterations + 1):
         used_iterations = iteration
-        for row, cols in enumerate(row_to_cols):
-            old_messages = check_messages[row]
-            q_values = [int(posterior[col]) - int(old_messages[idx]) for idx, col in enumerate(cols)]
-            sign_bits = [1 if value < 0 else 0 for value in q_values]
-            abs_values = [abs(value) for value in q_values]
-            sign_xor = 0
-            for sign in sign_bits:
-                sign_xor ^= sign
+        for group_idx, group in enumerate(schedule.groups):
+            group_updates: list[
+                tuple[
+                    int,
+                    int,
+                    tuple[int, ...],
+                    tuple[int, ...],
+                    tuple[int, ...],
+                    int,
+                    int,
+                    int,
+                    list[int],
+                    list[int],
+                    list[int],
+                ]
+            ] = []
+            group_variables: set[int] = set()
+            for assignment in group:
+                if not assignment.valid:
+                    continue
+                row = assignment.row
+                cols = row_to_cols[row]
+                if set(cols) & group_variables:
+                    raise AssertionError(f"schedule group {group_idx} has shared variables")
+                group_variables.update(cols)
 
-            min1 = 1 << 30
-            min2 = 1 << 30
-            min1_idx = 0
-            for idx, abs_value in enumerate(abs_values):
-                if abs_value < min1:
-                    min2 = min1
-                    min1 = abs_value
-                    min1_idx = idx
-                elif abs_value < min2:
-                    min2 = abs_value
+                old_messages = check_messages[row]
+                old_posteriors = [int(posterior[col]) for col in cols]
+                q_values = [
+                    old_posteriors[idx] - int(old_messages[idx])
+                    for idx in range(len(cols))
+                ]
+                sign_bits = [1 if value < 0 else 0 for value in q_values]
+                abs_values = [abs(value) for value in q_values]
+                sign_xor = 0
+                for sign in sign_bits:
+                    sign_xor ^= sign
 
-            new_messages: list[int] = []
-            for idx, col in enumerate(cols):
-                selected_min = min2 if idx == min1_idx else min1
-                scaled = selected_min * 3 // 4
-                value = -scaled if (sign_xor ^ sign_bits[idx]) else scaled
-                clipped, clipped_count = _clip_with_count(value, lo, hi)
-                saturation_count += clipped_count
-                new_messages.append(clipped)
+                min1 = 1 << 30
+                min2 = 1 << 30
+                min1_idx = 0
+                for idx, abs_value in enumerate(abs_values):
+                    if abs_value < min1:
+                        min2 = min1
+                        min1 = abs_value
+                        min1_idx = idx
+                    elif abs_value < min2:
+                        min2 = abs_value
 
-            for idx, col in enumerate(cols):
-                total = q_values[idx] + new_messages[idx]
-                clipped_total, clipped_count = _clip_with_count(total, lo, hi)
-                saturation_count += clipped_count
-                posterior[col] = clipped_total
-                hard[col] = 1 if clipped_total < 0 else 0
+                new_messages: list[int] = []
+                new_posteriors: list[int] = []
+                hard_bits: list[int] = []
+                for idx, _col in enumerate(cols):
+                    selected_min = min2 if idx == min1_idx else min1
+                    scaled = selected_min * 3 // 4
+                    value = -scaled if (sign_xor ^ sign_bits[idx]) else scaled
+                    clipped, clipped_count = _clip_with_count(value, lo, hi)
+                    saturation_count += clipped_count
+                    new_messages.append(clipped)
 
-            check_messages[row] = new_messages
+                    total = q_values[idx] + clipped
+                    clipped_total, clipped_count = _clip_with_count(total, lo, hi)
+                    saturation_count += clipped_count
+                    new_posteriors.append(clipped_total)
+                    hard_bits.append(1 if clipped_total < 0 else 0)
+
+                group_updates.append(
+                    (
+                        assignment.lane,
+                        row,
+                        tuple(cols),
+                        tuple(old_messages),
+                        tuple(q_values),
+                        min1,
+                        min2,
+                        min1_idx,
+                        new_messages,
+                        new_posteriors,
+                        hard_bits,
+                    )
+                )
+
+            for (
+                lane,
+                row,
+                cols,
+                old_messages,
+                q_values,
+                min1,
+                min2,
+                min1_idx,
+                new_messages,
+                new_posteriors,
+                hard_bits,
+            ) in group_updates:
+                for idx, col in enumerate(cols):
+                    if trace:
+                        trace_entries.append(
+                            FixedDecodeTraceEntry(
+                                iteration=iteration,
+                                group=group_idx,
+                                lane=lane,
+                                row=row,
+                                edge_slot=idx,
+                                variable=col,
+                                old_posterior=int(posterior[col]),
+                                old_check_message=int(old_messages[idx]),
+                                q=int(q_values[idx]),
+                                min1=int(min1),
+                                min2=int(min2),
+                                min1_index=int(min1_idx),
+                                new_check_message=int(new_messages[idx]),
+                                new_posterior=int(new_posteriors[idx]),
+                                hard_decision=int(hard_bits[idx]),
+                            )
+                        )
+                    posterior[col] = new_posteriors[idx]
+                    hard[col] = hard_bits[idx]
+
+                check_messages[row] = list(new_messages)
 
         syndrome = ar4ja.syndrome_full(hard)
         if int(syndrome.sum()) == 0:
@@ -154,4 +267,5 @@ def decode_normalized_min_sum_fixed(
         saturation_count=saturation_count,
         decoder_success=converged,
         decoder_fail=not converged,
+        trace=tuple(trace_entries),
     )
