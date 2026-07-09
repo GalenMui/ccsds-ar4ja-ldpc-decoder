@@ -43,13 +43,22 @@ Current limitations:
 
 - Only 3/4 normalization is implemented.
 - Only this CCSDS mode is supported.
-- `LANES=8` is the production default. `LANES=16` compiles and passes the
-  deterministic RTL vector regression in this environment, but vendor timing
-  and resource use are not yet measured.
-- Vivado was not available in this environment, so vendor utilization/timing
-  were not measured.
-- The local Yosys build cannot parse the generated SystemVerilog package, so
-  generic synthesis is blocked by tool support here.
+- `LANES=8` is the production default. `LANES=1`, `LANES=8`, and `LANES=16`
+  all pass the deterministic RTL vector regression (all 11 vectors) in this
+  environment, but vendor timing and resource use are not yet measured.
+- Vivado 2025.2 is installed and its target-part smoke check passes, but a
+  full out-of-context synthesis of the `LANES=8` IP has not yet completed on
+  the local 12 GB host: the run reached technology mapping after ~1.5 h and
+  did not finish, so **no utilization, timing, LUT/FF/BRAM/DSP, or Fmax
+  numbers are available yet.**
+- The current RTL infers the posterior and check-message memories as large
+  flip-flop arrays rather than block RAM (Vivado reports ~20k + ~74k
+  registers and ignores the `ram_style="block"` attribute); memory inference
+  must be fixed before area/timing can close on the XC7Z020.
+- The local Yosys 0.9 build cannot parse the generated SystemVerilog package,
+  so open-source generic synthesis is blocked by tool support here.
+- The AXI-Stream wrapper, core decoder, and syndrome simulations all build and
+  pass under the installed Icarus 14 toolchain.
 
 ## Fixed-Point Rules
 
@@ -195,6 +204,14 @@ make package-ip FPGA_PART=<fpga_part>
 
 The default clock constraint is 10 ns on `aclk` in
 `fpga/constraints/ldpc_axis_decoder.xdc`.
+
+**Current synthesis status:** Vivado 2025.2 is installed; the target-part
+smoke check (`make vivado-smoke`) passes and the `LANES=8` IP elaborates
+cleanly. A logged out-of-context `synth_design` run
+(`reports/vivado/synth_ip.log`) reached technology mapping after roughly
+1.5 hours but did not complete on the 12 GB host, so there are no completed
+utilization or timing reports yet. See `docs/SYNTHESIS.md` for the exact log
+state and the memory-inference issue that must be resolved first.
 
 ## PYNQ-Z2 Overlay
 

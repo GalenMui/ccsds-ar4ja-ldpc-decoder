@@ -82,11 +82,28 @@ module ldpc_decoder_top #(
 
     state_t state;
 
-    (* ram_style = "block" *) logic signed [LLR_W-1:0] posterior_mem [0:P-1][0:BANK_DEPTH-1];
-    (* ram_style = "block" *) logic [ROW_MSG_W-1:0] message_mem [0:P-1][0:GROUPS-1];
-
+    // Posterior/message storage is implemented as P independent single-port
+    // banks (see the g_posterior_banks / g_message_banks generate blocks near
+    // the end of the module).  Each physical bank is driven by exactly one
+    // read and one write port per cycle so Vivado infers block/distributed RAM
+    // instead of a 2560-/1536-deep register file with a giant address-decode
+    // mux tree.  The per-bank port signals are produced combinationally by the
+    // posterior/message crossbars below.  The bank output registers are:
     logic signed [LLR_W-1:0] posterior_read_data [0:P-1];
     logic [ROW_MSG_W-1:0] message_read_data [0:P-1];
+
+    // Per-bank posterior RAM ports (bank index == physical RAM index).
+    logic                       pmem_we    [0:P-1];
+    logic [BANK_ADDR_BITS-1:0]  pmem_waddr [0:P-1];
+    logic signed [LLR_W-1:0]    pmem_wdata [0:P-1];
+    logic                       pmem_re    [0:P-1];
+    logic [BANK_ADDR_BITS-1:0]  pmem_raddr [0:P-1];
+
+    // Per-bank message RAM ports.  Read and write always use group_idx as the
+    // address, so only enables and write data need routing.
+    logic                       mmem_we    [0:P-1];
+    logic [ROW_MSG_W-1:0]       mmem_wdata [0:P-1];
+    logic                       mmem_re    [0:P-1];
 
     logic [TX_ADDR_BITS:0] load_count;
     logic llr_loaded_frame;
@@ -329,9 +346,12 @@ module ldpc_decoder_top #(
             hard_full <= '0;
             syndrome_any_failed <= 1'b0;
 
+            // posterior_read_data / message_read_data are RAM output registers
+            // driven by the bank generate blocks; they are intentionally not
+            // reset here so they infer as block-RAM output registers.  They are
+            // always written one cycle before they are consumed, so their
+            // power-up value is functionally don't-care.
             for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
-                posterior_read_data[lane_loop] <= '0;
-                message_read_data[lane_loop] <= '0;
                 lane_row[lane_loop] <= '0;
                 lane_degree[lane_loop] <= '0;
                 lane_min1_mag[lane_loop] <= '1;
@@ -360,9 +380,8 @@ module ldpc_decoder_top #(
                 load_count <= '0;
                 llr_loaded_frame <= 1'b0;
             end else if (llr_write_fire) begin
-                posterior_mem[posterior_bank({{(COL_BITS-TX_ADDR_BITS){1'b0}}, llr_write_addr})]
-                             [posterior_addr({{(COL_BITS-TX_ADDR_BITS){1'b0}}, llr_write_addr})]
-                    <= llr_write_data;
+                // posterior_mem write is performed by the posterior bank
+                // generate block via the pmem_* crossbar (see always_comb).
                 hard_full[llr_write_addr] <= llr_write_data[LLR_W-1];
                 if (llr_write_addr == TX_N - 1) begin
                     load_count <= TX_N[TX_ADDR_BITS:0];
@@ -396,8 +415,8 @@ module ldpc_decoder_top #(
                             TX_N[COL_BITS-1:0] +
                             (({{(COL_BITS-PUNCTURED_GROUP_BITS){1'b0}}, punctured_group_idx}) * P) +
                             lane_loop[COL_BITS-1:0];
-                        posterior_mem[posterior_bank(punctured_variable)]
-                                     [posterior_addr(punctured_variable)] <= '0;
+                        // posterior_mem clear performed by the bank generate
+                        // block via the pmem_* crossbar (see always_comb).
                         hard_full[punctured_variable] <= 1'b0;
                     end
 
@@ -410,10 +429,8 @@ module ldpc_decoder_top #(
                 end
 
                 S_CLEAR_CHECK_MESSAGES: begin
-                    for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
-                        message_mem[lane_loop][group_idx] <= '0;
-                    end
-
+                    // message_mem[*][group_idx] cleared by the message bank
+                    // generate block via the mmem_* crossbar (see always_comb).
                     if (group_idx == GROUPS - 1) begin
                         group_idx <= '0;
                         syndrome_any_failed <= 1'b0;
@@ -444,9 +461,9 @@ module ldpc_decoder_top #(
                 end
 
                 S_GROUP_MESSAGE_READ: begin
-                    for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
-                        message_read_data[lane_loop] <= message_mem[lane_loop][group_idx];
-                    end
+                    // message_read_data is loaded from message_mem[*][group_idx]
+                    // by the message bank generate block (mmem_re asserted this
+                    // cycle; data captured next cycle in S_GROUP_MESSAGE_CAPTURE).
                     state <= S_GROUP_MESSAGE_CAPTURE;
                 end
 
@@ -488,13 +505,10 @@ module ldpc_decoder_top #(
                 end
 
                 S_GROUP_EDGE_READ_REQUEST: begin
-                    for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
-                        if (edge_idx < lane_degree[lane_loop]) begin
-                            posterior_read_data[lane_bank[lane_loop][edge_idx]] <=
-                                posterior_mem[lane_bank[lane_loop][edge_idx]]
-                                             [lane_addr[lane_loop][edge_idx]];
-                        end
-                    end
+                    // Per-bank posterior reads are issued by the bank generate
+                    // block (pmem_re/pmem_raddr asserted this cycle via the
+                    // crossbar; data lands in posterior_read_data[bank] next
+                    // cycle for S_GROUP_EDGE_READ_CAPTURE).
                     state <= S_GROUP_EDGE_READ_CAPTURE;
                 end
 
@@ -536,11 +550,11 @@ module ldpc_decoder_top #(
                 end
 
                 S_GROUP_EDGE_WRITE: begin
+                    // posterior_mem writes performed by the bank generate block
+                    // via the pmem_* crossbar; only hard-decision bits are
+                    // updated here.
                     for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
                         if (edge_idx < lane_degree[lane_loop]) begin
-                            posterior_mem[lane_bank[lane_loop][edge_idx]]
-                                         [lane_addr[lane_loop][edge_idx]]
-                                <= posterior_clipped[lane_loop];
                             hard_full[lane_col[lane_loop][edge_idx]] <=
                                 posterior_clipped[lane_loop][LLR_W-1];
                         end
@@ -556,10 +570,8 @@ module ldpc_decoder_top #(
                 end
 
                 S_GROUP_MESSAGE_WRITE: begin
-                    for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
-                        message_mem[lane_loop][group_idx] <= computed_msg_row[lane_loop];
-                    end
-
+                    // message_mem[*][group_idx] <= computed_msg_row is performed
+                    // by the message bank generate block via the mmem_* crossbar.
                     if (group_idx == GROUPS - 1) begin
                         group_idx <= '0;
                         syndrome_any_failed <= 1'b0;
@@ -611,6 +623,134 @@ module ldpc_decoder_top #(
             endcase
         end
     end
+
+    // ------------------------------------------------------------------
+    // Posterior RAM crossbar.
+    //
+    // The decode schedule guarantees that the (up to) P active lanes address
+    // P *distinct* posterior banks every cycle (checked by the assertions at
+    // the bottom of this module).  We therefore route each per-lane access
+    // onto one of P physical single-port banks so that every bank sees at most
+    // one read and one write per cycle.  This lets Vivado infer P small RAMs
+    // instead of a 2560-deep register file with a full address-decode mux tree.
+    // ------------------------------------------------------------------
+    logic [COL_BITS-1:0] llr_col_ext;
+    assign llr_col_ext = {{(COL_BITS-TX_ADDR_BITS){1'b0}}, llr_write_addr};
+
+    always_comb begin
+        logic [COL_BITS-1:0] pv;
+
+        for (int b = 0; b < P; b = b + 1) begin
+            pmem_we[b]    = 1'b0;
+            pmem_waddr[b] = '0;
+            pmem_wdata[b] = '0;
+            pmem_re[b]    = 1'b0;
+            pmem_raddr[b] = '0;
+        end
+
+        // Read port routing (S_GROUP_EDGE_READ_REQUEST).
+        if (state == S_GROUP_EDGE_READ_REQUEST) begin
+            for (int l = 0; l < P; l = l + 1) begin
+                if (edge_idx < lane_degree[l]) begin
+                    pmem_re[lane_bank[l][edge_idx]]    = 1'b1;
+                    pmem_raddr[lane_bank[l][edge_idx]] = lane_addr[l][edge_idx];
+                end
+            end
+        end
+
+        // Write port routing.  The three write sources are mutually exclusive
+        // by state (load only fires in S_IDLE, puncture-clear in
+        // S_INIT_PUNCTURED, edge write in S_GROUP_EDGE_WRITE); the priority
+        // order below preserves the original always_ff structure.
+        if (!llr_load_clear && llr_write_fire) begin
+            pmem_we[posterior_bank(llr_col_ext)]    = 1'b1;
+            pmem_waddr[posterior_bank(llr_col_ext)] = posterior_addr(llr_col_ext);
+            pmem_wdata[posterior_bank(llr_col_ext)] = llr_write_data;
+        end else if (state == S_INIT_PUNCTURED) begin
+            for (int l = 0; l < P; l = l + 1) begin
+                pv = TX_N[COL_BITS-1:0] +
+                     (({{(COL_BITS-PUNCTURED_GROUP_BITS){1'b0}}, punctured_group_idx}) * P) +
+                     l[COL_BITS-1:0];
+                pmem_we[posterior_bank(pv)]    = 1'b1;
+                pmem_waddr[posterior_bank(pv)] = posterior_addr(pv);
+                pmem_wdata[posterior_bank(pv)] = '0;
+            end
+        end else if (state == S_GROUP_EDGE_WRITE) begin
+            for (int l = 0; l < P; l = l + 1) begin
+                if (edge_idx < lane_degree[l]) begin
+                    pmem_we[lane_bank[l][edge_idx]]    = 1'b1;
+                    pmem_waddr[lane_bank[l][edge_idx]] = lane_addr[l][edge_idx];
+                    pmem_wdata[lane_bank[l][edge_idx]] = posterior_clipped[l];
+                end
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Message RAM crossbar.  message_mem is indexed as [lane][group_idx], i.e.
+    // lane == physical bank, so no address permutation is needed: every bank
+    // uses group_idx for both read and write and we only route enables/data.
+    // ------------------------------------------------------------------
+    always_comb begin
+        for (int b = 0; b < P; b = b + 1) begin
+            mmem_we[b]    = 1'b0;
+            mmem_wdata[b] = '0;
+            mmem_re[b]    = 1'b0;
+        end
+
+        if (state == S_GROUP_MESSAGE_READ) begin
+            for (int b = 0; b < P; b = b + 1) begin
+                mmem_re[b] = 1'b1;
+            end
+        end else if (state == S_CLEAR_CHECK_MESSAGES) begin
+            for (int b = 0; b < P; b = b + 1) begin
+                mmem_we[b] = 1'b1;      // mmem_wdata already 0
+            end
+        end else if (state == S_GROUP_MESSAGE_WRITE) begin
+            for (int b = 0; b < P; b = b + 1) begin
+                mmem_we[b]    = 1'b1;
+                mmem_wdata[b] = computed_msg_row[b];
+            end
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // Physical banks.  Each bank is a plain single-port synchronous RAM with a
+    // registered read port -- the canonical Vivado block/distributed RAM
+    // template.  Read and write enables are never asserted in the same cycle
+    // for a given bank, so no read/write collision handling is required.
+    // ------------------------------------------------------------------
+    genvar gp;
+    generate
+        for (gp = 0; gp < P; gp = gp + 1) begin : g_posterior_banks
+            (* ram_style = "block" *)
+            logic signed [LLR_W-1:0] bank_mem [0:BANK_DEPTH-1];
+            always_ff @(posedge clk) begin
+                if (pmem_we[gp]) begin
+                    bank_mem[pmem_waddr[gp]] <= pmem_wdata[gp];
+                end
+                if (pmem_re[gp]) begin
+                    posterior_read_data[gp] <= bank_mem[pmem_raddr[gp]];
+                end
+            end
+        end
+    endgenerate
+
+    genvar gm;
+    generate
+        for (gm = 0; gm < P; gm = gm + 1) begin : g_message_banks
+            (* ram_style = "block" *)
+            logic [ROW_MSG_W-1:0] bank_mem [0:GROUPS-1];
+            always_ff @(posedge clk) begin
+                if (mmem_we[gm]) begin
+                    bank_mem[group_idx] <= mmem_wdata[gm];
+                end
+                if (mmem_re[gm]) begin
+                    message_read_data[gm] <= bank_mem[group_idx];
+                end
+            end
+        end
+    endgenerate
 
 `ifdef LDPC_ENABLE_ASSERTS
     always @(posedge clk) begin

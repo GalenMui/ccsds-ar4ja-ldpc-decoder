@@ -282,7 +282,7 @@ module ldpc_axis_wrapper #(
                             m_axis_tvalid <= 1'b0;
                             m_axis_tkeep <= 4'd0;
                             m_axis_tlast <= 1'b0;
-                            state <= drain_after_output ? W_DRAIN : W_IDLE;
+                            state <= wrapper_state_t'(drain_after_output ? W_DRAIN : W_IDLE);
                         end else begin
                             output_word_count <= output_word_count + 1'b1;
                             m_axis_tdata <= output_word(output_word_count + 1'b1);

@@ -1,3 +1,8 @@
+# Recipes below `source` Vivado's settings64.sh, which uses the bash-only
+# `source` builtin.  Force bash so `make vivado-*` works on systems where
+# /bin/sh is dash (e.g. Ubuntu).
+SHELL := /bin/bash
+
 PYTHON ?= python3
 VIVADO ?= vivado
 FPGA_PART ?=

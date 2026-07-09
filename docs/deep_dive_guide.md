@@ -148,19 +148,19 @@ Files to read:
 - `rtl/ldpc_decoder_top.sv`
 - `sim/tb_ldpc_decoder_top.sv`
 
-Core idea: the RTL follows the Python layered normalized min-sum order at
-frame-output level: sequential load, punctured initialization, row-packed
-message fetch, edge-serial posterior reads, immediate layered writeback,
-syndrome check, and early termination.
+Core idea: the RTL follows the Python generated schedule at frame-output level:
+sequential AXI load, bank-parallel punctured initialization, lane-banked
+message fetch, one posterior edge phase per group, immediate layered writeback,
+syndrome group check, and early termination.
 
 Trace:
 
 - `S_INIT_PUNCTURED`
 - `S_CLEAR_CHECK_MESSAGES`
-- `S_INITIAL_CHECK`
-- `S_ROW_MESSAGE_READ`
-- `S_ROW_EDGE_READ_CAPTURE`
-- `S_ROW_EDGE_WRITE`
+- `S_INITIAL_SYNDROME`
+- `S_GROUP_MESSAGE_READ`
+- `S_GROUP_EDGE_READ_CAPTURE`
+- `S_GROUP_EDGE_WRITE`
 - `S_ITERATION_SYNDROME`
 - `iterations_used`
 - `cycles_elapsed`
@@ -190,30 +190,31 @@ Files to read:
 - `rtl/ldpc_decoder_top.sv`
 - `rtl/message_memory.sv`
 
-Core idea: check messages are stored as one packed word per row. The active row
-is unpacked into six local registers, updated, and written back as a packed row.
+Core idea: check messages are stored as one packed word per row per processing
+lane. The active schedule group reads up to `LANES` packed rows, unpacks six
+local registers per lane, updates them, and writes the group back.
 
 Trace:
 
 - `row_weight()`
 - `row_col()`
-- `col_weight()`
-- `col_row()`
-- `col_row_edge()`
-- `message_memory` packed row
-- row-local `q` and `R_mj_new` registers
+- `ldpc_schedule_pkg::schedule_lanes_supported()`
+- modulo posterior bank map
+- lane-banked packed row messages
+- lane-local `q` and `R_mj_new` registers
 
 Common mistakes:
 
 - Assuming local edge index equals column degree index.
 - Reordering row columns without regenerating vectors and package.
 - Running stale `rtl/ar4ja_1024_pkg.sv`.
+- Claiming a new `LANES` value without adding schedule validation and RTL tests.
 
 Test:
 
 ```sh
-python3 scripts/gen_syndrome_rom.py
-python3 scripts/run_regression.py
+make generate
+make test
 ```
 
 ## Step 7: Inspect RTL Against Python Vectors
@@ -248,7 +249,7 @@ Test:
 ```sh
 python3 scripts/inspect_decoder_vector.py --list
 python3 scripts/inspect_decoder_vector.py 10
-python3 scripts/run_regression.py
+make test
 ```
 
 ## Step 8: Inspect AXI Wrapper Framing
@@ -259,8 +260,8 @@ Files to read:
 - `sim/tb_ldpc_axis_wrapper.sv`
 - `rtl/ldpc_axis_decoder_ip.sv`
 
-Core idea: the wrapper accepts exactly 512 32-bit input words and emits exactly
-40 32-bit output words with status and decoded payload.
+Core idea: the wrapper accepts exactly 512 full-keep 32-bit input words and
+emits exactly 40 full-keep 32-bit output words with status and decoded payload.
 
 Trace:
 
@@ -271,10 +272,13 @@ Trace:
 - `W_OUTPUT`
 - `W_DRAIN`
 - `s_axis_tready`
+- `s_axis_tkeep`
 - `m_axis_tvalid`
+- `m_axis_tkeep`
 - `m_axis_tlast`
 - `early_tlast_error`
 - `missing_tlast_error`
+- `tkeep_error`
 
 Common mistakes:
 
@@ -285,7 +289,7 @@ Common mistakes:
 Test:
 
 ```sh
-iverilog -g2012 -o sim/build/ldpc_axis_wrapper.vvp rtl/ar4ja_1024_pkg.sv rtl/posterior_memory.sv rtl/message_memory.sv rtl/ldpc_decoder_top.sv rtl/ldpc_axis_wrapper.sv sim/tb_ldpc_axis_wrapper.sv
+iverilog -g2012 -o sim/build/ldpc_axis_wrapper.vvp rtl/ar4ja_1024_pkg.sv rtl/ldpc_schedule_pkg.sv rtl/posterior_memory.sv rtl/message_memory.sv rtl/ldpc_decoder_top.sv rtl/ldpc_axis_wrapper.sv sim/tb_ldpc_axis_wrapper.sv
 vvp sim/build/ldpc_axis_wrapper.vvp
 ```
 
@@ -348,6 +352,6 @@ Questions to answer:
 Test:
 
 ```sh
-python3 scripts/run_regression.py
+make test
 make clean
 ```
