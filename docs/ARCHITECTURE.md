@@ -57,10 +57,10 @@ AXI input word
   -> 4 x signed int8 unpack
   -> sequential core LLR write port
   -> posterior banks[LANES][FULL_N/LANES]
-  -> grouped layered normalized min-sum updates
-  -> hard_full[2559:0]
-  -> syndrome checks after load and after each iteration
-  -> decoded_bits[1023:0]
+  -> grouped layered normalized min-sum updates (pipelined min1/min2 reduction)
+  -> hard decisions = posterior-bank sign bits
+  -> syndrome checks (serialised bank reads) after load and after each iteration
+  -> decoded_bits[1023:0] (serialised bank reads)
   -> 40-word AXI status/result frame
 ```
 
@@ -99,9 +99,14 @@ addr = variable / LANES
 Check messages are stored as one row-message bank per lane. Each row message is
 packed as six signed 8-bit values. Degree-3 rows zero the inactive slots.
 
-The hard-decision vector `hard_full[2559:0]` is a register vector updated during
-LLR load, punctured initialization, and layered writeback. It lets syndrome
-checks read all row bits without random RAM reads.
+Hard decisions are **not** stored separately: a variable's hard bit is exactly
+the sign bit of its stored posterior LLR, so the syndrome check and the final
+output read obtain hard bits by reading the posterior banks' sign bits, serialised
+over the banked read port (states `S_SYN_*` and `S_OUT_*`). This removed a former
+flat 2560-bit `hard_full` register and its wide variable-index mux network, which
+was the dominant LUT cost. The min1/min2 reduction is pipelined (folded one edge
+behind, `S_GROUP_MIN_DRAIN`) to keep the BRAM-read path off the min-compare path;
+this is what allowed 100 MHz setup closure.
 
 ## Schedule
 

@@ -8,7 +8,7 @@ module tb_ldpc_decoder_top;
     localparam int LLR_W = DECODER_VECTOR_LLR_W;
     localparam int MSG_W = 8;
     localparam int MAX_ITERS = DECODER_VECTOR_MAX_ITERS;
-    localparam int TIMEOUT_CYCLES = 400000;
+    localparam int TIMEOUT_CYCLES = 500000;
     parameter int LANES = 8;
 
     logic clk;

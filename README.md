@@ -25,11 +25,16 @@ Implemented:
 - Python systematic encoder and fixed-point layered normalized min-sum model.
 - Generated `rtl/ar4ja_1024_pkg.sv` graph package.
 - Memory-based RTL decoder core with:
-  - banked synchronous posterior RAM, 2560 signed 8-bit entries total;
-  - lane-banked row-packed check-message RAM, 1536 x 48 bits total;
-  - hard-decision vector updated during load and layered writeback;
+  - banked synchronous posterior RAM, 2560 signed 8-bit entries total
+    (P single-port banks, block-RAM inferred);
+  - lane-banked row-packed check-message RAM, 1536 x 48 bits total
+    (block-RAM inferred);
+  - hard decisions read directly from the posterior-bank sign bits (no separate
+    hard-decision register); syndrome check and output read are serialised over
+    the banked read port;
   - bank-parallel punctured-variable initialization;
   - bank-parallel check-message clear;
+  - pipelined min1/min2 reduction (folded one edge behind) for timing;
   - generated conflict-free row groups for `LANES=1`, `LANES=8`, and
     `LANES=16`.
 - 32-bit AXI-Stream wrapper preserving the 512-word input and 40-word output ABI.
@@ -44,21 +49,37 @@ Current limitations:
 - Only 3/4 normalization is implemented.
 - Only this CCSDS mode is supported.
 - `LANES=8` is the production default. `LANES=1`, `LANES=8`, and `LANES=16`
-  all pass the deterministic RTL vector regression (all 11 vectors) in this
-  environment, but vendor timing and resource use are not yet measured.
-- Vivado 2025.2 is installed and its target-part smoke check passes, but a
-  full out-of-context synthesis of the `LANES=8` IP has not yet completed on
-  the local 12 GB host: the run reached technology mapping after ~1.5 h and
-  did not finish, so **no utilization, timing, LUT/FF/BRAM/DSP, or Fmax
-  numbers are available yet.**
-- The current RTL infers the posterior and check-message memories as large
-  flip-flop arrays rather than block RAM (Vivado reports ~20k + ~74k
-  registers and ignores the `ram_style="block"` attribute); memory inference
-  must be fixed before area/timing can close on the XC7Z020.
+  all pass the deterministic RTL vector regression (all 11 vectors).
 - The local Yosys 0.9 build cannot parse the generated SystemVerilog package,
   so open-source generic synthesis is blocked by tool support here.
 - The AXI-Stream wrapper, core decoder, and syndrome simulations all build and
   pass under the installed Icarus 14 toolchain.
+
+## Timing / Resources (Vivado 2025.2, xc7z020clg400-1, OOC)
+
+`ldpc_axis_decoder_ip`, `LANES=8`, clock `aclk` 10.000 ns (100 MHz):
+
+| Metric | Value |
+|--------|-------|
+| Stage | out-of-context **post-route implementation** |
+| Setup WNS / TNS | **+0.009 ns / 0.000 ns** (0 failing endpoints) |
+| Hold WHS / THS | **+0.128 ns / 0.000 ns** (0 failing endpoints) |
+| Slice LUTs | 7 848 (14.75 %) |
+| Slice Registers | 4 626 (4.35 %) |
+| Block RAM tiles | 12 = 8×RAMB36 + 8×RAMB18 (8.57 %) |
+| DSP48E1 | 0 |
+| Critical warnings | 0 |
+
+The posterior and check-message memories infer block RAM (no flip-flop arrays,
+`ram_style="block"` honoured). Setup closure at 100 MHz was reached with a
+directed implementation (`synth -retiming`, `place`/`route -directive Explore`,
+post-route `phys_opt_design`); the default flow lands at WNS −0.056 ns (≈99.4
+MHz). Reproduce with `experiments/synthesis/impl_ip_timing.tcl` (default) or the
+directed strategy documented in `docs/SYNTHESIS_MEMORY_ANALYSIS.md`.
+
+**Not yet done:** bitstream generation, PYNQ-Z2 board bring-up, on-hardware
+end-to-end testing, and measured hardware throughput/BER. Numbers above are
+tool-reported OOC implementation results, not board measurements.
 
 ## Fixed-Point Rules
 
@@ -205,13 +226,13 @@ make package-ip FPGA_PART=<fpga_part>
 The default clock constraint is 10 ns on `aclk` in
 `fpga/constraints/ldpc_axis_decoder.xdc`.
 
-**Current synthesis status:** Vivado 2025.2 is installed; the target-part
-smoke check (`make vivado-smoke`) passes and the `LANES=8` IP elaborates
-cleanly. A logged out-of-context `synth_design` run
-(`reports/vivado/synth_ip.log`) reached technology mapping after roughly
-1.5 hours but did not complete on the 12 GB host, so there are no completed
-utilization or timing reports yet. See `docs/SYNTHESIS.md` for the exact log
-state and the memory-inference issue that must be resolved first.
+**Current synthesis status:** Vivado 2025.2; the `LANES=8` IP completes
+out-of-context synthesis **and place & route** on the target part. Setup timing
+closes at 100 MHz (post-route WNS +0.009 ns, hold WHS +0.128 ns, 0 critical
+warnings); block RAM is inferred for the posterior and check-message memories.
+See the "Timing / Resources" table above and `docs/SYNTHESIS_MEMORY_ANALYSIS.md`
+for the full architecture/timing analysis and reproduction steps. Bitstream
+generation and board bring-up are not yet done.
 
 ## PYNQ-Z2 Overlay
 

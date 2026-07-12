@@ -76,12 +76,14 @@ def _make_vector(name: str, payload: np.ndarray, llr: np.ndarray) -> DecoderVect
     # check and the final output read are now serialised over the P-wide banked
     # read port instead of a single-cycle combinational scan (that removed the
     # flat 2560-bit hard-decision register and its wide mux cones).  At P=1:
-    #   decode/iter    = M*13 + (CHECKS-M)*22        (unchanged)
+    #   decode/iter    = M*13 + (CHECKS-M)*22 + CHECKS  (+CHECKS = one extra
+    #                    S_GROUP_MIN_DRAIN cycle per group for the pipelined
+    #                    min1/min2 reduction; at P=1 there are CHECKS groups)
     #   syndrome/sweep = M*7  + (CHECKS-M)*13 + 1     (P reads/edge, 2 cyc/edge)
     #   init           = PUNCTURED_N + CHECKS         (puncture-clear + msg-clear)
     #   output read    = 2 * INFO_N                   (2 cyc per hard bit)
     # with one syndrome sweep before decoding plus one per iteration.
-    decode_iter = (ar4ja.M * 13) + ((ar4ja.CHECKS - ar4ja.M) * 22)
+    decode_iter = (ar4ja.M * 13) + ((ar4ja.CHECKS - ar4ja.M) * 22) + ar4ja.CHECKS
     syndrome_sweep = (ar4ja.M * 7) + ((ar4ja.CHECKS - ar4ja.M) * 13) + 1
     init_cycles = ar4ja.PUNCTURED_N + ar4ja.CHECKS
     output_cycles = 2 * ar4ja.INFO_N

@@ -198,10 +198,16 @@ VIVADO_MAX_THREADS=2 make synth FPGA_PART=xc7z020clg400-1
   over the banked posterior RAM. Re-synthesis: **LUT-as-logic 104 072 → 7 990
   (15 %)**, FF 3 002, BRAM 12 tiles, DSP 0 — the design now fits with large margin.
   Functionally verified (all decoder vectors at LANES 1/8/16, plus AXI framing).
-- **Remaining item — timing.** Full-IP synth with the 100 MHz clock fits on area
-  but misses timing (**WNS −57.8 ns**), dominated by the wide `saturation_count`
-  adder chain (a diagnostic counter). The low-risk fix (narrow the accumulator) is
-  described in **`docs/SYNTHESIS_MEMORY_ANALYSIS.md`** → "Remediation status".
+- **Timing — closed at 100 MHz.** The −57.8 ns WNS (the `saturation_count`
+  diagnostic counter, a 48-deep 32-bit ripple exposed once storage moved to BRAM)
+  was fixed by four behaviour-preserving RTL changes: (1) `$countones` popcount
+  tree, (2) deferred 32-bit accumulate from registers, (3) lane-local saturation
+  subcounts, (4) pipelined min1/min2 reduction (fold one edge behind +
+  `S_GROUP_MIN_DRAIN`). **Full place & route: WNS −57.8 → +0.009 ns (100 MHz met)**
+  with a directed impl (default flow lands at −0.056 ns / 4 endpoints ≈ 99.4 MHz), hold met,
+  BRAM/DSP unchanged, decode bit-identical. Fix (4) adds **+1 cycle per group**
+  of latency. Details in **`docs/SYNTHESIS_MEMORY_ANALYSIS.md`** →
+  "Setup-timing remediation". Do not relax the 100 MHz XDC.
 - PYNQ-Z2 project synthesis, implementation, bitstream generation, and overlay
   export have **not** been run.
 - The bitstream target remains gated: `constraints/pynq_z2.xdc` is marked

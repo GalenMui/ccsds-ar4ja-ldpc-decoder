@@ -254,10 +254,11 @@ is accumulated as `+32'd1` **per edge across P·MAX_ROW_WEIGHT = 48 conditional
 * **LUT overflow: FIXED.** Removing the redundant `hard_full` register cut LUT-as-
   logic to **15–20 % of the XC7Z020**. The design fits with large margin on every
   area axis and has ample place-and-route headroom.
-* **Timing: NOT yet closed.** WNS −57.8 ns at 100 MHz, dominated by the wide
-  `saturation_count` adder chain (remediation item #4 below). This is the next
-  required fix; it is small and behaviour-preserving (the counter *value* is
-  unchanged — only the accumulation width/structure).
+* **Timing: closed at 100 MHz.** WNS improved from −57.8 ns to ~0 ns post-route
+  (default flow −0.056 ns / 4 endpoints; ≥ 0 with a directed impl) via four
+  behaviour-preserving RTL fixes (popcount tree, deferred accumulate, lane-local
+  popcount, pipelined min-sum reduction). See "Setup-timing remediation". Hold
+  met. BRAM/DSP unchanged; decode bit-identical.
 
 ### Where the LUTs go (from the RTL component report, `synth.log`)
 
@@ -273,21 +274,87 @@ is accumulated as `+32'd1` **per edge across P·MAX_ROW_WEIGHT = 48 conditional
   32-bit add per edge (48 conditional 32-bit adds) instead of a small local count
   widened once.
 
-## Remediation status & next steps
+## Setup-timing remediation (saturation_count)
 
-1. **Bank/serialise the hard-decision store — ✅ DONE (this change).** The flat
-   2560-bit `hard_full` register was removed as a redundant shadow of the
-   posterior-bank sign bit; the syndrome and output readers were serialised over
-   the banked posterior read port. LUT-as-logic 104 072 → 7 990. Verified.
-2. **Narrow `saturation_count` accumulation — NEXT (timing).** Currently a chain of
-   48 conditional 32-bit adds/group ⇒ the −57.8 ns critical path. Compute a small
-   local per-group count (≤48 ⇒ 6 bits) and add it to the 32-bit total once. The
-   counter value is unchanged, so it is behaviour-preserving; expected to remove
-   the dominant critical path. **Small, low-risk — the recommended next fix.**
-3. **Pipeline the min-sum / connectivity path if timing still misses** after (2)
-   (register `row_col`/`perm_col` outputs; split the min-sum select). Medium risk.
-4. **(Optional) ROM the row→column adjacency** to further trim `perm_col`
-   arithmetic and improve timing/area margin.
+### Root cause
+`saturation_count` (a 32-bit diagnostic event counter) was accumulated as
+`+ 32'd1` **inside** the per-edge min-sum loop — `P*MAX_ROW_WEIGHT = 48`
+conditional **32-bit** adds in series each group, plus 8 more for the posterior
+counter. Synthesis built a **48-deep 32-bit ripple chain** (`45 CARRY4`,
+**102 logic levels**, ~30 ns of pure logic) fed by the min-sum cone
+(`lane_min1_idx → selected_min → ×3 → saturate → flag`). It appeared as the worst
+setup path (`lane_min1_idx_reg → saturation_count_reg`) **only because BRAM-backed
+storage removed the old register-array noise**, exposing this pre-existing deep
+combinational accumulator. It is *not* on the decode datapath.
 
-Every RTL change must be re-verified against all decoder vectors (LANES = 1/8/16)
-and the AXI framing tests, then re-synthesised for area **and timing**.
+### Fix (implemented, low risk, behaviour-preserving)
+1. **Popcount tree instead of a ripple chain.** Collect one saturation flag per
+   (lane,edge) / per lane into `msg_sat_flags` / `post_sat_flags` and sum with
+   `$countones` (a balanced compressor tree) → narrow count.
+2. **Defer the 32-bit accumulate one state, from registers only.** The narrow
+   per-group msg count is registered (`msg_sat_pending`) in `S_GROUP_COMPUTE`; the
+   posterior count is narrow-accumulated (`post_sat_accum`) across the edge loop;
+   the single 32-bit `saturation_count` add happens in `S_GROUP_MESSAGE_WRITE`
+   from **registered** operands, so the wide carry chain is no longer in series
+   with the min-sum logic. The counter *value* and decode latency are unchanged
+   (verified: identical `saturation_count` on every vector; identical cycles).
+
+### Targeted experiments (OOC, xc7z020, `clk`=100 MHz; `experiments/synthesis/`)
+
+Fixes were applied evidence-first, re-measuring after each (OOC core WNS and, for
+the endpoints, a per-path logic-vs-route breakdown):
+
+| Step | RTL change | Core WNS | Binding path | Bound by |
+|------|-----------|---------:|--------------|----------|
+| baseline | 48-deep 32-bit ripple | **−54.1 ns** | `→ saturation_count` (102 lvls) | logic |
+| A. popcount tree | `$countones` | **−6.07 ns** | `→ saturation_count` (23 lvls) | logic |
+| B. deferred accumulate | register narrow count | **−2.66 ns** | `→ msg_sat_pending` | route |
+| C. lane-local popcount | per-lane subcounts | **−0.86 ns** | posterior-BRAM addr crossbar | route |
+| D. **pipeline min-sum reduction** | fold min1/min2 one edge behind (new `S_GROUP_MIN_DRAIN`) | **+0.16 ns** | — | — |
+
+The path breakdown (step C) was decisive: the worst path had only **3.5 ns of
+logic** but ~9 ns of route (a `$countones` gathering `P*MAX_ROW_WEIGHT` flags from
+P dispersed lanes), while the genuine min-sum reduction (`BRAM → subtract → abs →
+compare → lane_min`) had **5 ns of logic** — so the real remedies were (C) making
+the popcount lane-local and (D) pipelining the min-sum reduction, **not** adding
+depth to logic that was already shallow.
+
+**Fix D (the min-sum reduction pipeline):** the edge-read loop already registers
+each edge's magnitude in `lane_mag[]`. The min1/min2/min1_idx update is now folded
+**one edge behind from that registered magnitude** (Stage 2), with a trailing
+`S_GROUP_MIN_DRAIN` state to fold the last edge. This takes the
+`BRAM → subtract → abs` chain off the min-compare path (min-update is now just
+`lane_mag reg → compare → lane_min reg`). Latency cost: **+1 cycle per group**
+(`cycle_max.mem` / `gen_decoder_vectors.py` updated; sim `TIMEOUT_CYCLES` raised);
+decode results and `saturation_count` are **bit-identical**.
+
+### Full-IP place & route (measured)
+
+Stage: **OOC implementation, post-route** (`synth_design -mode out_of_context` →
+`opt` → `place` → `phys_opt` → `route` → `phys_opt`), top `ldpc_axis_decoder_ip`,
+part `xc7z020clg400-1` (speed −1), clock `aclk` 10.000 ns.
+Evidence: `experiments/synthesis/results/impl_ip_strong/{timing_postroute.rpt,util.rpt}`
+(directed) and `experiments/synthesis/results/impl_ip/timing_postroute.rpt` (default).
+0 critical warnings.
+
+| Metric | before timing work | after A–D (directed) |
+|--------|-------------------:|----------:|
+| Post-route setup WNS / TNS | **−57.8 ns / −1964 ns** | **+0.009 ns / 0.000 ns** ✅ |
+| Post-route hold WHS / THS | — | **+0.128 ns / 0.000 ns** ✅ |
+| Setup failing endpoints | 260 | **0** |
+| Fmax | ~15 MHz | **≥ 100 MHz** |
+| Slice LUTs | — | **7 848 (14.75 %)** |
+| Slice Registers (FF) | — | **4 626 (4.35 %)** |
+| Block RAM tiles | 12 | **12** (8×RAMB36 + 8×RAMB18, 8.57 %) |
+| DSP48E1 | 0 | **0** |
+
+(The default, non-directed flow lands at WNS −0.056 ns / 4 endpoints ≈ 99.4 MHz;
+same utilization.)
+
+BRAM inference (8×RAMB36 + 8×RAMB18) is intact at **every** step. The default
+implementation lands at WNS −0.056 ns (4 endpoints, ~99.4 MHz) — a routing-run
+residual on a route-dominated posterior-write path; a directed implementation
+(`synth -retiming`, `place -directive Explore`, `route -directive Explore`,
+aggressive post-route `phys_opt`) closes it to **WNS +0.009 ns, WHS +0.128 ns —
+100 MHz met** (`experiments/synthesis/results/impl_ip_strong/`). Do **not** relax
+the 100 MHz XDC.

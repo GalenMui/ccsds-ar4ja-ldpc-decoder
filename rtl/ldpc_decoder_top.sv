@@ -86,6 +86,7 @@ module ldpc_decoder_top #(
         S_GROUP_MESSAGE_CAPTURE,
         S_GROUP_EDGE_READ_REQUEST,
         S_GROUP_EDGE_READ_CAPTURE,
+        S_GROUP_MIN_DRAIN,
         S_GROUP_COMPUTE,
         S_GROUP_EDGE_WRITE,
         S_GROUP_MESSAGE_WRITE,
@@ -157,13 +158,30 @@ module ldpc_decoder_top #(
     logic lane_sign_from_q [0:P-1];
 
     logic signed [MSG_W-1:0] computed_new_msg [0:P-1][0:MAX_ROW_WEIGHT-1];
-    logic [31:0] computed_msg_saturations;
     logic [ROW_MSG_W-1:0] computed_msg_row [0:P-1];
+    // Saturation accounting.  The msg saturation count is reduced LANE-LOCALLY:
+    // each lane popcounts its own MAX_ROW_WEIGHT flags (all sourced from that
+    // lane's min-sum logic, so the reduction stays physically local) into a small
+    // per-lane subcount; the P subcounts are registered and only summed one state
+    // later.  This avoids a single popcount that gathers P*MAX_ROW_WEIGHT flags
+    // from P dispersed lanes -- that wide gather was the route-bound worst path.
+    localparam int LANE_SAT_W = $clog2(MAX_ROW_WEIGHT + 1);
+    logic [MAX_ROW_WEIGHT-1:0]  msg_sat_flags [0:P-1];   // per-lane edge flags
+    logic [LANE_SAT_W-1:0]      lane_msg_sat  [0:P-1];   // per-lane popcount (comb)
 
     logic signed [SAT_W-1:0] posterior_math [0:P-1];
     logic signed [LLR_W-1:0] posterior_clipped [0:P-1];
     logic posterior_saturated [0:P-1];
     logic [31:0] computed_posterior_saturations;
+    logic [P-1:0] post_sat_flags;   // one flag per lane, popcounted (see above)
+
+    // Pipeline the saturation accounting: the min-sum -> popcount cones feed these
+    // NARROW registers, and the single 32-bit accumulate into saturation_count is
+    // done one state later from registered values only, so the wide carry chain is
+    // no longer in series with the min-sum logic.
+    localparam int SAT_CNT_W = $clog2((P * MAX_ROW_WEIGHT) + 1);
+    logic [LANE_SAT_W-1:0] lane_msg_sat_r [0:P-1]; // registered per-lane subcounts
+    logic [SAT_CNT_W-1:0]  post_sat_accum;         // this group's posterior saturations
 
     int unsigned lane_loop;
     int unsigned edge_loop;
@@ -266,9 +284,9 @@ module ldpc_decoder_top #(
     end
 
     always @* begin
-        computed_msg_saturations = 32'd0;
         for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
             computed_msg_row[lane_loop] = '0;
+            msg_sat_flags[lane_loop] = '0;
             for (edge_loop = 0; edge_loop < MAX_ROW_WEIGHT; edge_loop = edge_loop + 1) begin
                 logic [MAG_W-1:0] selected_min;
                 logic [SCALE_W-1:0] scaled_mag;
@@ -296,16 +314,18 @@ module ldpc_decoder_top #(
                     computed_new_msg[lane_loop][edge_loop] = saturate_msg(signed_msg);
                     computed_msg_row[lane_loop][edge_loop * MSG_W +: MSG_W] =
                         computed_new_msg[lane_loop][edge_loop];
-                    if (msg_would_saturate(signed_msg)) begin
-                        computed_msg_saturations = computed_msg_saturations + 32'd1;
-                    end
+                    // One flag per edge, kept in this lane's own flag word.
+                    msg_sat_flags[lane_loop][edge_loop] = msg_would_saturate(signed_msg);
                 end
             end
+            // Lane-local popcount (<= MAX_ROW_WEIGHT): stays near this lane's logic.
+            lane_msg_sat[lane_loop] =
+                LANE_SAT_W'($countones(msg_sat_flags[lane_loop]));
         end
     end
 
     always @* begin
-        computed_posterior_saturations = 32'd0;
+        post_sat_flags = '0;
         for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
             posterior_math[lane_loop] =
                 {{(SAT_W-Q_W){lane_q[lane_loop][edge_idx][Q_W-1]}}, lane_q[lane_loop][edge_idx]} +
@@ -313,10 +333,10 @@ module ldpc_decoder_top #(
                  lane_new_msg[lane_loop][edge_idx]};
             posterior_clipped[lane_loop] = saturate_llr(posterior_math[lane_loop]);
             posterior_saturated[lane_loop] = llr_would_saturate(posterior_math[lane_loop]);
-            if ((edge_idx < lane_degree[lane_loop]) && posterior_saturated[lane_loop]) begin
-                computed_posterior_saturations = computed_posterior_saturations + 32'd1;
-            end
+            post_sat_flags[lane_loop] =
+                (edge_idx < lane_degree[lane_loop]) && posterior_saturated[lane_loop];
         end
+        computed_posterior_saturations = 32'($countones(post_sat_flags));
     end
 
     // Syndrome is now accumulated per row into lane_syn[] during the serialised
@@ -334,6 +354,10 @@ module ldpc_decoder_top #(
             iterations_used <= '0;
             cycles_elapsed <= 32'd0;
             saturation_count <= 32'd0;
+            post_sat_accum <= '0;
+            for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
+                lane_msg_sat_r[lane_loop] <= '0;
+            end
             load_count <= '0;
             llr_loaded_frame <= 1'b0;
             group_idx <= '0;
@@ -583,29 +607,57 @@ module ldpc_decoder_top #(
                 end
 
                 S_GROUP_EDGE_READ_CAPTURE: begin
+                    // Stage 1: store this edge's magnitude/sign/q from the BRAM
+                    // read (BRAM -> subtract -> abs -> register).  The min1/min2
+                    // reduction is NOT done here; it is folded one edge behind
+                    // from the *registered* magnitude (Stage 2 below), which keeps
+                    // the BRAM->subtract->abs path off the min-compare path.
                     for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
                         if (edge_idx < lane_degree[lane_loop]) begin
                             lane_q[lane_loop][edge_idx] <= lane_q_from_read[lane_loop];
                             lane_sign[lane_loop][edge_idx] <= lane_sign_from_q[lane_loop];
                             lane_mag[lane_loop][edge_idx] <= lane_mag_from_q[lane_loop];
                             lane_sign_xor[lane_loop] <= lane_sign_xor[lane_loop] ^ lane_sign_from_q[lane_loop];
-                            if (lane_mag_from_q[lane_loop] < lane_min1_mag[lane_loop]) begin
+                        end
+                        // Stage 2: fold the PREVIOUS edge (edge_idx-1), whose
+                        // magnitude is now registered in lane_mag[].
+                        if ((edge_idx != 0) && ((edge_idx - 1'b1) < lane_degree[lane_loop])) begin
+                            if (lane_mag[lane_loop][edge_idx - 1'b1] < lane_min1_mag[lane_loop]) begin
                                 lane_min2_mag[lane_loop] <= lane_min1_mag[lane_loop];
-                                lane_min1_mag[lane_loop] <= lane_mag_from_q[lane_loop];
-                                lane_min1_idx[lane_loop] <= edge_idx;
-                            end else if (lane_mag_from_q[lane_loop] < lane_min2_mag[lane_loop]) begin
-                                lane_min2_mag[lane_loop] <= lane_mag_from_q[lane_loop];
+                                lane_min1_mag[lane_loop] <= lane_mag[lane_loop][edge_idx - 1'b1];
+                                lane_min1_idx[lane_loop] <= edge_idx - 1'b1;
+                            end else if (lane_mag[lane_loop][edge_idx - 1'b1] < lane_min2_mag[lane_loop]) begin
+                                lane_min2_mag[lane_loop] <= lane_mag[lane_loop][edge_idx - 1'b1];
                             end
                         end
                     end
 
                     if (edge_idx == group_degree - 1'b1) begin
-                        edge_idx <= '0;
-                        state <= S_GROUP_COMPUTE;
+                        state <= S_GROUP_MIN_DRAIN;
                     end else begin
                         edge_idx <= edge_idx + 1'b1;
                         state <= S_GROUP_EDGE_READ_REQUEST;
                     end
+                end
+
+                S_GROUP_MIN_DRAIN: begin
+                    // Fold the final edge (group_degree-1), completing the
+                    // pipelined min1/min2 reduction before S_GROUP_COMPUTE.
+                    for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
+                        logic [EDGE_BITS-1:0] last_edge;
+                        last_edge = group_degree[EDGE_BITS-1:0] - 1'b1;
+                        if (last_edge < lane_degree[lane_loop]) begin
+                            if (lane_mag[lane_loop][last_edge] < lane_min1_mag[lane_loop]) begin
+                                lane_min2_mag[lane_loop] <= lane_min1_mag[lane_loop];
+                                lane_min1_mag[lane_loop] <= lane_mag[lane_loop][last_edge];
+                                lane_min1_idx[lane_loop] <= last_edge;
+                            end else if (lane_mag[lane_loop][last_edge] < lane_min2_mag[lane_loop]) begin
+                                lane_min2_mag[lane_loop] <= lane_mag[lane_loop][last_edge];
+                            end
+                        end
+                    end
+                    edge_idx <= '0;
+                    state <= S_GROUP_COMPUTE;
                 end
 
                 S_GROUP_COMPUTE: begin
@@ -614,7 +666,13 @@ module ldpc_decoder_top #(
                             lane_new_msg[lane_loop][edge_loop] <= computed_new_msg[lane_loop][edge_loop];
                         end
                     end
-                    saturation_count <= saturation_count + computed_msg_saturations;
+                    // Register the lane-local msg saturation subcounts; the P
+                    // subcounts are summed (and the 32-bit accumulate done) in
+                    // S_GROUP_MESSAGE_WRITE.
+                    for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
+                        lane_msg_sat_r[lane_loop] <= lane_msg_sat[lane_loop];
+                    end
+                    post_sat_accum <= '0;
                     edge_idx <= '0;
                     state <= S_GROUP_EDGE_WRITE;
                 end
@@ -623,7 +681,10 @@ module ldpc_decoder_top #(
                     // posterior_mem writes (whose sign IS the new hard decision)
                     // performed by the bank generate block via the pmem_*
                     // crossbar.  No separate hard-decision store to update.
-                    saturation_count <= saturation_count + computed_posterior_saturations;
+                    // Narrow-accumulate this edge's posterior saturations (<=P);
+                    // the 32-bit add happens once at group end.
+                    post_sat_accum <=
+                        post_sat_accum + computed_posterior_saturations[SAT_CNT_W-1:0];
 
                     if (edge_idx == group_degree - 1'b1) begin
                         edge_idx <= '0;
@@ -636,6 +697,19 @@ module ldpc_decoder_top #(
                 S_GROUP_MESSAGE_WRITE: begin
                     // message_mem[*][group_idx] <= computed_msg_row is performed
                     // by the message bank generate block via the mmem_* crossbar.
+                    // Sum the P registered lane-local msg subcounts and do the
+                    // single 32-bit accumulate -- fed only from registers, so no
+                    // min-sum logic is in this path.
+                    logic [SAT_CNT_W-1:0] msg_sat_total;
+                    msg_sat_total = '0;
+                    for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
+                        msg_sat_total = msg_sat_total +
+                            {{(SAT_CNT_W-LANE_SAT_W){1'b0}}, lane_msg_sat_r[lane_loop]};
+                    end
+                    saturation_count <=
+                        saturation_count +
+                        {{(32-SAT_CNT_W){1'b0}}, msg_sat_total} +
+                        {{(32-SAT_CNT_W){1'b0}}, post_sat_accum};
                     if (group_idx == GROUPS - 1) begin
                         group_idx <= '0;
                         syndrome_any_failed <= 1'b0;

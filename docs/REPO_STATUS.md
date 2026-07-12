@@ -155,22 +155,27 @@ python3 smoke_test.py
 python3 benchmark.py --frames 10
 ```
 
-## Vivado Status (July 7, 2026)
+## Vivado Status (July 12, 2026)
 
-This supersedes the "Vivado: not installed" notes above.
+This supersedes the earlier "did not complete / ~94k flip-flops" notes.
 
-- Vivado 2025.2 is installed at `/tools/AMD/2025.2/Vivado`.
-- `make vivado-smoke` passes and confirms the `xc7z020clg400-1` part is
-  available (`reports/vivado/smoke.log`).
-- The `LANES=8` `ldpc_axis_decoder_ip` **elaborates cleanly** under Vivado.
-- A logged out-of-context `synth_design` run began synthesis but **did not
-  complete** on the 12 GB host: `reports/vivado/synth_ip.log` ends inside
-  technology mapping after ~1.5 h (peak ~10.9 GB RSS). No utilization, timing,
-  or checkpoint outputs were produced.
-- Root cause to fix first: posterior/check-message memories infer as ~94k
-  flip-flops instead of block RAM (`ram_style="block"` ignored). See
-  `docs/SYNTHESIS.md`.
-- No LUT/FF/BRAM/DSP/timing/Fmax numbers are available or claimed.
+- Vivado 2025.2 installed; `make vivado-smoke` passes for `xc7z020clg400-1`.
+- The `LANES=8` `ldpc_axis_decoder_ip` **completes out-of-context synthesis and
+  place & route** on the target part, with **0 critical warnings**.
+- **Setup timing closes at 100 MHz** (post-route WNS **+0.009 ns**, TNS 0.000 ns,
+  0 failing endpoints; hold WHS **+0.128 ns**, TNS 0.000 ns).
+- **Utilization:** Slice LUTs 7,848 (14.75 %), Slice Registers 4,626 (4.35 %),
+  Block RAM 12 tiles (8×RAMB36 + 8×RAMB18, 8.57 %), DSP 0.
+- The posterior and check-message memories now **infer block RAM** (the former
+  ~94k flip-flop inference is fixed by per-lane single-port banking; the flat
+  `hard_full` register was removed as a redundant posterior-sign shadow). Setup
+  closure required a pipelined min1/min2 reduction and lane-local saturation
+  counting. Full analysis: `docs/SYNTHESIS_MEMORY_ANALYSIS.md`.
+- Evidence (OOC, tool-reported, not gitted — regenerate via
+  `experiments/synthesis/impl_ip_timing.tcl`):
+  `experiments/synthesis/results/impl_ip_strong/{timing_postroute.rpt,util.rpt}`.
+- **Not done:** bitstream generation, PYNQ-Z2 board bring-up, on-hardware testing,
+  measured hardware throughput/BER.
 - Toolchain note: the AXI wrapper, core decoder (`LANES=1/8/16`), and syndrome
   sims all build and pass under the installed Icarus 14. (An enum ternary at
   `rtl/ldpc_axis_wrapper.sv:285` that previously failed to elaborate under
