@@ -54,6 +54,9 @@ module ldpc_decoder_top #(
     localparam int PUNCTURED_GROUP_BITS = (PUNCTURED_GROUPS > 1) ? $clog2(PUNCTURED_GROUPS) : 1;
     localparam int OUTPUT_WORDS = K_BITS / 32;
     localparam int OUTPUT_BITS = $clog2(OUTPUT_WORDS);
+    // Final output is read back P hard bits (posterior sign bits) per cycle.
+    localparam int OUTPUT_READS = K_BITS / P;
+    localparam int OUTPUT_READ_BITS = (OUTPUT_READS > 1) ? $clog2(OUTPUT_READS) : 1;
     localparam int Q_W = ((LLR_W > MSG_W) ? LLR_W : MSG_W) + 1;
     localparam int MAG_W = Q_W + 1;
     localparam int SCALE_W = MAG_W + 2;
@@ -63,11 +66,22 @@ module ldpc_decoder_top #(
     localparam logic signed [SAT_W-1:0] LLR_MIN_VALUE = -(1 <<< (LLR_W - 1));
     localparam logic signed [SAT_W-1:0] LLR_MAX_VALUE =  (1 <<< (LLR_W - 1)) - 1;
 
+    // The syndrome check and final output both read hard decisions.  The hard
+    // decision of a variable node is exactly the sign bit of its stored
+    // posterior LLR, so instead of shadowing every hard bit in a flat 2560-bit
+    // `hard_full` register (which synthesised into ~17 wide variable-index write
+    // muxes plus a 48-way 2560:1 read scan), we read the sign bit straight out
+    // of the already-banked posterior RAM.  That requires serialising both
+    // readers over the same P-wide banked read port the decoder edge loop uses;
+    // the S_SYN_* and S_OUT_* states below do exactly that.
     typedef enum logic [4:0] {
         S_IDLE,
         S_INIT_PUNCTURED,
         S_CLEAR_CHECK_MESSAGES,
-        S_INITIAL_SYNDROME,
+        S_SYN_CAPTURE,
+        S_SYN_EDGE_REQ,
+        S_SYN_EDGE_CAP,
+        S_SYN_FINISH,
         S_GROUP_MESSAGE_READ,
         S_GROUP_MESSAGE_CAPTURE,
         S_GROUP_EDGE_READ_REQUEST,
@@ -75,8 +89,8 @@ module ldpc_decoder_top #(
         S_GROUP_COMPUTE,
         S_GROUP_EDGE_WRITE,
         S_GROUP_MESSAGE_WRITE,
-        S_ITERATION_SYNDROME,
-        S_FINALIZE_OUTPUT,
+        S_OUT_REQ,
+        S_OUT_CAP,
         S_DONE
     } state_t;
 
@@ -115,12 +129,13 @@ module ldpc_decoder_top #(
     logic [DEGREE_BITS-1:0] group_degree;
     logic [$clog2(MAX_ITERS+1)-1:0] iteration_idx;
     logic [PUNCTURED_GROUP_BITS-1:0] punctured_group_idx;
-    logic [OUTPUT_BITS-1:0] output_word_idx;
+    logic [OUTPUT_READ_BITS-1:0] output_read_idx;
 
-    logic [FULL_N-1:0] hard_full;
-    logic syndrome_any_failed;
-    logic syndrome_group_failed;
-    logic syndrome_done_pass;
+    // Hard decisions are no longer shadowed in a flat register; they are read
+    // from the posterior bank sign bits on demand (S_SYN_* / S_OUT_*).
+    logic syndrome_any_failed;   // sticky across a full syndrome sweep
+    logic syn_initial;           // 1 = pre-decode sweep, 0 = post-iteration sweep
+    logic lane_syn [0:P-1];      // per-row parity accumulator during a sweep
 
     logic [ROW_BITS-1:0] lane_row [0:P-1];
     logic [DEGREE_BITS-1:0] lane_degree [0:P-1];
@@ -304,25 +319,9 @@ module ldpc_decoder_top #(
         end
     end
 
-    always @* begin
-        syndrome_group_failed = 1'b0;
-        for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
-            logic row_failed;
-            logic [ROW_BITS-1:0] syndrome_row;
-
-            row_failed = 1'b0;
-            syndrome_row = (group_idx * P) + lane_loop[ROW_BITS-1:0];
-            for (edge_loop = 0; edge_loop < MAX_ROW_WEIGHT; edge_loop = edge_loop + 1) begin
-                if (edge_loop < ar4ja_1024_pkg::row_weight(syndrome_row)) begin
-                    row_failed =
-                        row_failed ^
-                        hard_full[ar4ja_1024_pkg::row_col(syndrome_row, edge_loop)];
-                end
-            end
-            syndrome_group_failed = syndrome_group_failed | row_failed;
-        end
-        syndrome_done_pass = !(syndrome_any_failed || syndrome_group_failed);
-    end
+    // Syndrome is now accumulated per row into lane_syn[] during the serialised
+    // S_SYN_EDGE_CAP read pass (see the FSM), so the old combinational full-
+    // codeword syndrome scan over hard_full has been removed.
 
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -342,9 +341,9 @@ module ldpc_decoder_top #(
             group_degree <= '0;
             iteration_idx <= '0;
             punctured_group_idx <= '0;
-            output_word_idx <= '0;
-            hard_full <= '0;
+            output_read_idx <= '0;
             syndrome_any_failed <= 1'b0;
+            syn_initial <= 1'b0;
 
             // posterior_read_data / message_read_data are RAM output registers
             // driven by the bank generate blocks; they are intentionally not
@@ -358,6 +357,7 @@ module ldpc_decoder_top #(
                 lane_min2_mag[lane_loop] <= '1;
                 lane_min1_idx[lane_loop] <= '0;
                 lane_sign_xor[lane_loop] <= 1'b0;
+                lane_syn[lane_loop] <= 1'b0;
                 for (edge_loop = 0; edge_loop < MAX_ROW_WEIGHT; edge_loop = edge_loop + 1) begin
                     lane_col[lane_loop][edge_loop] <= '0;
                     lane_bank[lane_loop][edge_loop] <= '0;
@@ -380,9 +380,9 @@ module ldpc_decoder_top #(
                 load_count <= '0;
                 llr_loaded_frame <= 1'b0;
             end else if (llr_write_fire) begin
-                // posterior_mem write is performed by the posterior bank
-                // generate block via the pmem_* crossbar (see always_comb).
-                hard_full[llr_write_addr] <= llr_write_data[LLR_W-1];
+                // posterior_mem write (data, whose sign is the hard decision) is
+                // performed by the posterior bank generate block via the pmem_*
+                // crossbar (see always_comb).
                 if (llr_write_addr == TX_N - 1) begin
                     load_count <= TX_N[TX_ADDR_BITS:0];
                     llr_loaded_frame <= 1'b1;
@@ -408,18 +408,11 @@ module ldpc_decoder_top #(
                 end
 
                 S_INIT_PUNCTURED: begin
-                    for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
-                        logic [COL_BITS-1:0] punctured_variable;
-
-                        punctured_variable =
-                            TX_N[COL_BITS-1:0] +
-                            (({{(COL_BITS-PUNCTURED_GROUP_BITS){1'b0}}, punctured_group_idx}) * P) +
-                            lane_loop[COL_BITS-1:0];
-                        // posterior_mem clear performed by the bank generate
-                        // block via the pmem_* crossbar (see always_comb).
-                        hard_full[punctured_variable] <= 1'b0;
-                    end
-
+                    // The punctured posterior columns are cleared to 0 (sign 0 =>
+                    // hard decision 0) by the posterior bank generate block via
+                    // the pmem_* crossbar (see always_comb), which recomputes the
+                    // punctured column addresses itself.  This state only walks
+                    // the puncture groups.
                     if (punctured_group_idx == PUNCTURED_GROUPS - 1) begin
                         group_idx <= '0;
                         state <= S_CLEAR_CHECK_MESSAGES;
@@ -434,29 +427,106 @@ module ldpc_decoder_top #(
                     if (group_idx == GROUPS - 1) begin
                         group_idx <= '0;
                         syndrome_any_failed <= 1'b0;
-                        state <= S_INITIAL_SYNDROME;
+                        syn_initial <= 1'b1;
+                        state <= S_SYN_CAPTURE;
                     end else begin
                         group_idx <= group_idx + 1'b1;
                     end
                 end
 
-                S_INITIAL_SYNDROME: begin
-                    syndrome_any_failed <= syndrome_any_failed | syndrome_group_failed;
-                    if (group_idx == GROUPS - 1) begin
-                        syndrome_pass <= syndrome_done_pass;
-                        if (syndrome_done_pass || MAX_ITERS == 0) begin
-                            decoder_success <= syndrome_done_pass;
-                            decoder_fail <= !syndrome_done_pass;
+                // ---- Serialised syndrome sweep -----------------------------
+                // For each group of P check rows, load the per-row edge->bank/
+                // addr connectivity, then read P posterior sign bits per edge
+                // (edge e over the P rows hits P distinct banks, same guarantee
+                // the decode edge loop relies on) and XOR them into lane_syn[].
+                S_SYN_CAPTURE: begin
+                    group_degree <= ar4ja_1024_pkg::row_weight(group_idx * P);
+                    edge_idx <= '0;
+                    for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
+                        logic [ROW_BITS-1:0] syn_row;
+                        logic [DEGREE_BITS-1:0] syn_degree;
+
+                        syn_row = (group_idx * P) + lane_loop[ROW_BITS-1:0];
+                        syn_degree = ar4ja_1024_pkg::row_weight(syn_row);
+                        lane_degree[lane_loop] <= syn_degree;
+                        lane_syn[lane_loop] <= 1'b0;
+                        for (edge_loop = 0; edge_loop < MAX_ROW_WEIGHT; edge_loop = edge_loop + 1) begin
+                            logic [COL_BITS-1:0] syn_col;
+                            syn_col = ar4ja_1024_pkg::row_col(syn_row, edge_loop);
+                            lane_bank[lane_loop][edge_loop] <= posterior_bank(syn_col);
+                            lane_addr[lane_loop][edge_loop] <= posterior_addr(syn_col);
+                        end
+                    end
+                    state <= S_SYN_EDGE_REQ;
+                end
+
+                S_SYN_EDGE_REQ: begin
+                    // pmem_re/pmem_raddr for this edge asserted by the crossbar;
+                    // sign bits land in posterior_read_data[bank] next cycle.
+                    state <= S_SYN_EDGE_CAP;
+                end
+
+                S_SYN_EDGE_CAP: begin
+                    // XOR this edge's P sign bits into the per-row parities.
+                    // syn_group_failed uses the post-this-edge parity so that on
+                    // the final edge it reflects the complete row parity with no
+                    // extra cycle / non-blocking hazard.
+                    logic syn_group_failed;
+                    syn_group_failed = 1'b0;
+                    for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
+                        logic syn_bit;
+                        syn_bit = lane_syn[lane_loop];
+                        if (edge_idx < lane_degree[lane_loop]) begin
+                            syn_bit = syn_bit ^
+                                posterior_read_data[lane_bank[lane_loop][edge_idx]][LLR_W-1];
+                        end
+                        lane_syn[lane_loop] <= syn_bit;
+                        syn_group_failed = syn_group_failed | syn_bit;
+                    end
+
+                    if (edge_idx == group_degree - 1'b1) begin
+                        edge_idx <= '0;
+                        syndrome_any_failed <= syndrome_any_failed | syn_group_failed;
+                        if (group_idx == GROUPS - 1) begin
+                            state <= S_SYN_FINISH;
+                        end else begin
+                            group_idx <= group_idx + 1'b1;
+                            state <= S_SYN_CAPTURE;
+                        end
+                    end else begin
+                        edge_idx <= edge_idx + 1'b1;
+                        state <= S_SYN_EDGE_REQ;
+                    end
+                end
+
+                S_SYN_FINISH: begin
+                    logic syn_pass;
+                    syn_pass = !syndrome_any_failed;
+                    syndrome_pass <= syn_pass;
+                    if (syn_initial) begin
+                        if (syn_pass || MAX_ITERS == 0) begin
+                            decoder_success <= syn_pass;
+                            decoder_fail <= !syn_pass;
                             iterations_used <= '0;
-                            output_word_idx <= '0;
-                            state <= S_FINALIZE_OUTPUT;
+                            output_read_idx <= '0;
+                            state <= S_OUT_REQ;
                         end else begin
                             iteration_idx <= {{($bits(iteration_idx)-1){1'b0}}, 1'b1};
                             group_idx <= '0;
                             state <= S_GROUP_MESSAGE_READ;
                         end
                     end else begin
-                        group_idx <= group_idx + 1'b1;
+                        if (syn_pass || iteration_idx == MAX_ITERS[$bits(iteration_idx)-1:0]) begin
+                            decoder_success <= syn_pass;
+                            decoder_fail <= !syn_pass;
+                            iterations_used <= iteration_idx;
+                            output_read_idx <= '0;
+                            state <= S_OUT_REQ;
+                        end else begin
+                            iteration_idx <= iteration_idx + 1'b1;
+                            group_idx <= '0;
+                            state <= S_GROUP_MESSAGE_READ;
+                        end
                     end
                 end
 
@@ -550,15 +620,9 @@ module ldpc_decoder_top #(
                 end
 
                 S_GROUP_EDGE_WRITE: begin
-                    // posterior_mem writes performed by the bank generate block
-                    // via the pmem_* crossbar; only hard-decision bits are
-                    // updated here.
-                    for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
-                        if (edge_idx < lane_degree[lane_loop]) begin
-                            hard_full[lane_col[lane_loop][edge_idx]] <=
-                                posterior_clipped[lane_loop][LLR_W-1];
-                        end
-                    end
+                    // posterior_mem writes (whose sign IS the new hard decision)
+                    // performed by the bank generate block via the pmem_*
+                    // crossbar.  No separate hard-decision store to update.
                     saturation_count <= saturation_count + computed_posterior_saturations;
 
                     if (edge_idx == group_degree - 1'b1) begin
@@ -575,40 +639,35 @@ module ldpc_decoder_top #(
                     if (group_idx == GROUPS - 1) begin
                         group_idx <= '0;
                         syndrome_any_failed <= 1'b0;
-                        state <= S_ITERATION_SYNDROME;
+                        syn_initial <= 1'b0;
+                        state <= S_SYN_CAPTURE;
                     end else begin
                         group_idx <= group_idx + 1'b1;
                         state <= S_GROUP_MESSAGE_READ;
                     end
                 end
 
-                S_ITERATION_SYNDROME: begin
-                    syndrome_any_failed <= syndrome_any_failed | syndrome_group_failed;
-                    if (group_idx == GROUPS - 1) begin
-                        syndrome_pass <= syndrome_done_pass;
-                        if (syndrome_done_pass || iteration_idx == MAX_ITERS[$bits(iteration_idx)-1:0]) begin
-                            decoder_success <= syndrome_done_pass;
-                            decoder_fail <= !syndrome_done_pass;
-                            iterations_used <= iteration_idx;
-                            output_word_idx <= '0;
-                            state <= S_FINALIZE_OUTPUT;
-                        end else begin
-                            iteration_idx <= iteration_idx + 1'b1;
-                            group_idx <= '0;
-                            state <= S_GROUP_MESSAGE_READ;
-                        end
-                    end else begin
-                        group_idx <= group_idx + 1'b1;
-                    end
+                // ---- Serialised output read --------------------------------
+                // Read the K_BITS info-column hard decisions P at a time from the
+                // posterior bank sign bits.  Info column c maps to bank c%P at
+                // addr c/P, so reading every bank at addr = output_read_idx
+                // yields cols output_read_idx*P .. output_read_idx*P+P-1.
+                S_OUT_REQ: begin
+                    // pmem_re/pmem_raddr asserted by the crossbar this cycle;
+                    // sign bits land in posterior_read_data[*] next cycle.
+                    state <= S_OUT_CAP;
                 end
 
-                S_FINALIZE_OUTPUT: begin
-                    decoded_bits[output_word_idx * 32 +: 32] <=
-                        hard_full[output_word_idx * 32 +: 32];
-                    if (output_word_idx == OUTPUT_WORDS - 1) begin
+                S_OUT_CAP: begin
+                    for (lane_loop = 0; lane_loop < P; lane_loop = lane_loop + 1) begin
+                        decoded_bits[output_read_idx * P + lane_loop] <=
+                            posterior_read_data[lane_loop][LLR_W-1];
+                    end
+                    if (output_read_idx == OUTPUT_READS - 1) begin
                         state <= S_DONE;
                     end else begin
-                        output_word_idx <= output_word_idx + 1'b1;
+                        output_read_idx <= output_read_idx + 1'b1;
+                        state <= S_OUT_REQ;
                     end
                 end
 
@@ -648,13 +707,23 @@ module ldpc_decoder_top #(
             pmem_raddr[b] = '0;
         end
 
-        // Read port routing (S_GROUP_EDGE_READ_REQUEST).
-        if (state == S_GROUP_EDGE_READ_REQUEST) begin
+        // Read port routing.  Three mutually-exclusive-by-state readers share
+        // the single per-bank read port:
+        //   * decode edge read  (S_GROUP_EDGE_READ_REQUEST)
+        //   * syndrome edge read (S_SYN_EDGE_REQ) -- same per-lane bank/addr
+        //   * output read        (S_OUT_REQ)      -- every bank at one addr
+        if (state == S_GROUP_EDGE_READ_REQUEST || state == S_SYN_EDGE_REQ) begin
             for (int l = 0; l < P; l = l + 1) begin
                 if (edge_idx < lane_degree[l]) begin
                     pmem_re[lane_bank[l][edge_idx]]    = 1'b1;
                     pmem_raddr[lane_bank[l][edge_idx]] = lane_addr[l][edge_idx];
                 end
+            end
+        end else if (state == S_OUT_REQ) begin
+            for (int b = 0; b < P; b = b + 1) begin
+                pmem_re[b]    = 1'b1;
+                pmem_raddr[b] =
+                    {{(BANK_ADDR_BITS-OUTPUT_READ_BITS){1'b0}}, output_read_idx};
             end
         end
 

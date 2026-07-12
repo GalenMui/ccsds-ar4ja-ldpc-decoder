@@ -70,9 +70,29 @@ def _make_vector(name: str, payload: np.ndarray, llr: np.ndarray) -> DecoderVect
     # LANES=8, and LANES=16 while still checking deterministic convergence and
     # saturation metadata.
     cycle_min = 0
-    init_cycles = ar4ja.PUNCTURED_N + (2 * ar4ja.CHECKS) + (ar4ja.INFO_N // 32)
-    row_cycles = (ar4ja.M * 13) + ((ar4ja.CHECKS - ar4ja.M) * 22)
-    cycle_max = init_cycles + MAX_ITERS * (row_cycles + ar4ja.CHECKS)
+    # Upper bound uses the LANES=1 (fully serial) worst case, which bounds every
+    # supported LANES value (more lanes => fewer cycles).  The decoder reads hard
+    # decisions straight from the banked posterior sign bits, so the syndrome
+    # check and the final output read are now serialised over the P-wide banked
+    # read port instead of a single-cycle combinational scan (that removed the
+    # flat 2560-bit hard-decision register and its wide mux cones).  At P=1:
+    #   decode/iter    = M*13 + (CHECKS-M)*22        (unchanged)
+    #   syndrome/sweep = M*7  + (CHECKS-M)*13 + 1     (P reads/edge, 2 cyc/edge)
+    #   init           = PUNCTURED_N + CHECKS         (puncture-clear + msg-clear)
+    #   output read    = 2 * INFO_N                   (2 cyc per hard bit)
+    # with one syndrome sweep before decoding plus one per iteration.
+    decode_iter = (ar4ja.M * 13) + ((ar4ja.CHECKS - ar4ja.M) * 22)
+    syndrome_sweep = (ar4ja.M * 7) + ((ar4ja.CHECKS - ar4ja.M) * 13) + 1
+    init_cycles = ar4ja.PUNCTURED_N + ar4ja.CHECKS
+    output_cycles = 2 * ar4ja.INFO_N
+    worst = (
+        init_cycles
+        + syndrome_sweep
+        + MAX_ITERS * (decode_iter + syndrome_sweep)
+        + output_cycles
+    )
+    # Small slack for FSM transition cycles; still a meaningful hang/runaway cap.
+    cycle_max = worst + ar4ja.CHECKS + ar4ja.INFO_N
     return DecoderVector(
         name=name,
         payload=payload,

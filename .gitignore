@@ -80,3 +80,9 @@ results/*
 !results/plots/.gitkeep
 !results/reports/
 !results/reports/.gitkeep
+
+# Synthesis-experiment build artifacts (keep the reusable scripts + .rpt/.log,
+# drop the large checkpoints and Vivado scratch).
+experiments/synthesis/results/**/*.dcp
+experiments/synthesis/results/**/*.jou
+experiments/**/.Xil/

@@ -37,6 +37,13 @@ puts "repo_root : $repo_root"
 puts "part      : $part"
 puts "top       : $top"
 
+# Cap Vivado optimizer threads on a memory-constrained host (one ~0.8 GB worker
+# per thread during Cross-Boundary/Area Optimization).  Unset => Vivado default.
+if {[info exists ::env(VIVADO_MAX_THREADS)] && $::env(VIVADO_MAX_THREADS) ne ""} {
+    set_param general.maxThreads $::env(VIVADO_MAX_THREADS)
+    puts "NOTE: general.maxThreads capped at $::env(VIVADO_MAX_THREADS)"
+}
+
 # --- Read the RTL source manifest (packages are listed first). ---------------
 set manifest [file join $repo_root rtl ldpc_sources.f]
 if {![file exists $manifest]} { fail "source manifest not found: $manifest" }

@@ -10,6 +10,15 @@ if {[llength $argv] > 0} {
     exit 2
 }
 
+# On a memory-constrained host, Vivado's Cross-Boundary/Area Optimization forks
+# one ~0.8 GB worker per thread; on the combinational H-matrix cones in this
+# decoder that can exhaust a 12 GB box.  Cap threads via VIVADO_MAX_THREADS to
+# bound peak memory (trades wall time).  Unset => Vivado default (full speed).
+if {[info exists ::env(VIVADO_MAX_THREADS)] && $::env(VIVADO_MAX_THREADS) ne ""} {
+    set_param general.maxThreads $::env(VIVADO_MAX_THREADS)
+    puts "NOTE: general.maxThreads capped at $::env(VIVADO_MAX_THREADS) (VIVADO_MAX_THREADS)"
+}
+
 set build_dir [file join $repo_root results vivado_ooc synth]
 file mkdir $build_dir
 

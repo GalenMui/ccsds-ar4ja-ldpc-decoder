@@ -171,31 +171,37 @@ reports/vivado/smoke.log
   Target part available: xc7z020clg400-1
 ```
 
-- A logged out-of-context `synth_design -top ldpc_axis_decoder_ip
-  -part xc7z020clg400-1` run **elaborated the full RTL cleanly** and began
-  synthesis, but **did not complete** on the 12 GB host. The log
-  (`reports/vivado/synth_ip.log`) ends inside `Start Technology Mapping` after
-  roughly 1.5 h of cross-boundary/timing optimization (peak ~10.9 GB RSS with
-  ~100 MB physical memory free). No `utilization_*.rpt`,
-  `timing_summary_*.rpt`, or `.dcp` was produced.
-- Because synthesis did not finish, **no LUT, FF, BRAM, DSP, timing, power, or
-  Fmax numbers are available or claimed.**
-- The synthesis log shows the posterior and check-message memories are being
-  inferred as large flip-flop arrays, not block RAM:
+- **The `reports/vivado/synth_ip.log` (2026-07-07) is STALE.** It was produced
+  against the pre-`9e200af` RTL whose `posterior_mem[P][DEPTH]` /
+  `message_mem[P][GROUPS]` 2-D arrays inferred as ~94 k flip-flops
+  (`8-7186 ram_style ignored`, `8-11357 3D-RAM with 20480/73728 registers`) and
+  never finished (1.5 h, ~10.9 GB). That RTL no longer exists — commit `9e200af`
+  replaced it with per-lane single-port `bank_mem` generate blocks + a crossbar.
+- The current banked RTL has been re-characterized with targeted OOC experiments
+  (see `docs/SYNTHESIS_MEMORY_ANALYSIS.md` and `experiments/synthesis/`). It now
+  infers **block RAM with zero flip-flops for storage** — the `8-7186`/`8-11357`
+  warnings are **gone**, and the integrated decoder core peaks at **3.25 GB**
+  through RTL optimization (vs 10.9 GB before). Expected block RAM:
+  **16 × RAMB18E1 ≈ 8 BRAM tiles (~5.7 % of the XC7Z020)**.
+- With `VIVADO_MAX_THREADS=2` the decoder-core OOC synth now **runs to completion**
+  (~28 min, ≤ 7.96 GB) instead of thrashing in *Cross Boundary and Area
+  Optimization*:
 
-```text
-WARNING: [Synth 8-7186] Applying attribute ram_style = "block" is ignored,
-  object 'posterior_mem[0][0]' is not inferred as ram due to incorrect usage
-WARNING: [Synth 8-11357] Potential Runtime issue for 3D-RAM ... RAM
-  posterior_mem_reg with 20480 registers
-WARNING: [Synth 8-11357] Potential Runtime issue for 3D-RAM ... RAM
-  message_mem_reg with 73728 registers
+```sh
+VIVADO_MAX_THREADS=2 make synth FPGA_PART=xc7z020clg400-1
 ```
 
-  This flip-flop inference (~94k registers for the memories alone) is almost
-  certainly why synthesis is so slow/memory-hungry and must be resolved (single
-  synchronous read/write port per bank, no asynchronous reset over the array)
-  before area or timing can be assessed on the XC7Z020.
+- The first completing run exposed a LUT-fit blocker (~104 k LUTs = ~196 % of the
+  XC7Z020) caused by the flat 2560-bit `hard_full` hard-decision register's wide
+  mux cones. **This has been fixed:** `hard_full` was removed (it was a redundant
+  shadow of the posterior-bank sign bit) and the syndrome/output readers serialised
+  over the banked posterior RAM. Re-synthesis: **LUT-as-logic 104 072 → 7 990
+  (15 %)**, FF 3 002, BRAM 12 tiles, DSP 0 — the design now fits with large margin.
+  Functionally verified (all decoder vectors at LANES 1/8/16, plus AXI framing).
+- **Remaining item — timing.** Full-IP synth with the 100 MHz clock fits on area
+  but misses timing (**WNS −57.8 ns**), dominated by the wide `saturation_count`
+  adder chain (a diagnostic counter). The low-risk fix (narrow the accumulator) is
+  described in **`docs/SYNTHESIS_MEMORY_ANALYSIS.md`** → "Remediation status".
 - PYNQ-Z2 project synthesis, implementation, bitstream generation, and overlay
   export have **not** been run.
 - The bitstream target remains gated: `constraints/pynq_z2.xdc` is marked
