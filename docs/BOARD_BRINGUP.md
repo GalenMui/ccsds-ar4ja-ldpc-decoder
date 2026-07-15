@@ -37,18 +37,24 @@ build/pynq_z2/deploy/ccsds_ldpc_pynq_z2.hwh
 
 ## Hardware Test
 
-Deploy the runtime subset into an isolated directory, then connect to the
-PYNQ-Z2:
+Deploy the runtime subset into an isolated directory from the host:
 
 ```sh
 ./scripts/board/deploy_pynq.sh
-ssh pynq
-cd /home/xilinx/jupyter_notebooks/ccsds_ar4ja_ldpc_decoder
-python3 load_overlay.py
-python3 smoke_test.py
-python3 smoke_test.py --random-frames 3
-python3 benchmark.py --frames 10
 ```
+
+Then run the verified hardware commands from the board's existing root Jupyter
+terminal:
+
+```sh
+cd /home/xilinx/jupyter_notebooks/ccsds_ar4ja_ldpc_decoder
+XILINX_XRT=/usr /usr/local/share/pynq-venv/bin/python3 load_overlay.py
+XILINX_XRT=/usr /usr/local/share/pynq-venv/bin/python3 smoke_test.py
+```
+
+These hardware commands require a privileged PYNQ context on the tested
+PynqLinux 3.0 image. The root Jupyter terminal is the verified hardware path;
+device permissions and sudo policy remain unchanged.
 
 See `docs/PYNQ_Z2_BRINGUP.md` for measured timing/DRC evidence and the current
 hardware-test status.
@@ -56,6 +62,33 @@ hardware-test status.
 The smoke test loads the overlay, verifies `axi_dma_0`, runs the repository
 golden model, transfers frames through AXI DMA, and compares status plus
 decoded bits.
+
+## Verified Hardware Result
+
+The first physical smoke test passed on the TUL PYNQ-Z2 at 100 MHz:
+
+```text
+Overlay loaded: True
+DMA: axi_dma_0
+MM2S DMASR: 0x00001002 (idle, ioc_irq)
+S2MM DMASR: 0x00001002 (idle, ioc_irq)
+success=1 syndrome=1 failure=0 iterations=0 cycles=2625 saturation=0
+response words=40
+decoded SHA-256=5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef
+```
+
+The input was the minimal deterministic zero-noise frame: 1024 zero payload
+bits, 2048 LLRs of `+32`, packed into 512 words of `0x20202020`. This is a
+single-vector hardware smoke test, not a randomized hardware regression,
+throughput benchmark, or BER/FER result.
+
+The following extended commands are supported by the software but have not yet
+been physically validated:
+
+```sh
+XILINX_XRT=/usr /usr/local/share/pynq-venv/bin/python3 smoke_test.py --random-frames 3
+XILINX_XRT=/usr /usr/local/share/pynq-venv/bin/python3 benchmark.py --frames 10
+```
 
 ## DMA Contract
 

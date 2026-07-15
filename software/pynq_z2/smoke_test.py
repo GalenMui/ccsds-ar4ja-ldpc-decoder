@@ -4,12 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 from pathlib import Path
 
 import numpy as np
 
-from ccsds_ldpc_pynq import K_BITS, PynqLdpcDecoder
+from ccsds_ldpc_pynq import (
+    INPUT_WORDS,
+    K_BITS,
+    OUTPUT_WORDS,
+    PynqLdpcDecoder,
+    pack_llrs_to_words,
+)
 
 
 def _add_repo_or_package_root() -> None:
@@ -41,6 +48,45 @@ def _frame_from_payload(payload: np.ndarray) -> tuple[np.ndarray, np.ndarray, ob
     return tx, llr, golden
 
 
+def _array_sha256(values: np.ndarray) -> str:
+    return hashlib.sha256(np.ascontiguousarray(values).tobytes()).hexdigest()
+
+
+def _free_buffer(buffer: object) -> None:
+    free = getattr(buffer, "freebuffer", None)
+    if callable(free):
+        free()
+
+
+def _validate_buffer_allocation(llr: np.ndarray) -> None:
+    from pynq import allocate
+
+    words = pack_llrs_to_words(llr)
+    in_buf = allocate(shape=(INPUT_WORDS,), dtype=np.uint32)
+    out_buf = allocate(shape=(OUTPUT_WORDS,), dtype=np.uint32)
+    try:
+        in_buf[:] = words
+        out_buf[:] = 0
+        flush = getattr(in_buf, "flush", None)
+        if callable(flush):
+            flush()
+        print(
+            f"  input: address=0x{int(in_buf.physical_address):08x} "
+            f"words={in_buf.size} bytes={in_buf.nbytes} dtype={in_buf.dtype}"
+        )
+        print(
+            f"  output: address=0x{int(out_buf.physical_address):08x} "
+            f"words={out_buf.size} bytes={out_buf.nbytes} dtype={out_buf.dtype}"
+        )
+        print(
+            f"  packed input: first=0x{int(words[0]):08x} "
+            f"last=0x{int(words[-1]):08x} sha256={_array_sha256(words)}"
+        )
+    finally:
+        _free_buffer(in_buf)
+        _free_buffer(out_buf)
+
+
 def _check_response(name: str, response: object, golden: object) -> list[str]:
     errors: list[str] = []
     expected_bits = golden.hard_transmitted[:K_BITS].astype(np.uint8)
@@ -62,8 +108,31 @@ def _check_response(name: str, response: object, golden: object) -> list[str]:
 
 
 def _run_frame(decoder: PynqLdpcDecoder, name: str, payload: np.ndarray, timeout_s: float) -> bool:
-    _tx, llr, golden = _frame_from_payload(payload)
-    response = decoder.decode_llrs(llr, timeout_s=timeout_s)
+    tx, llr, golden = _frame_from_payload(payload)
+    expected_bits = golden.hard_transmitted[:K_BITS].astype(np.uint8)
+    print(
+        f"  input {name}: payload_bits={payload.size} payload_sha256={_array_sha256(payload)} "
+        f"codeword_sha256={_array_sha256(tx)} llr_sha256={_array_sha256(llr)}"
+    )
+    print(
+        "  expected: "
+        f"success={int(golden.decoder_success)} syndrome={int(golden.converged)} "
+        f"failure={int(golden.decoder_fail)} iterations={int(golden.iterations)} "
+        f"saturation={int(golden.saturation_count)} "
+        f"decoded_sha256={_array_sha256(expected_bits)}"
+    )
+    response = decoder.decode_llrs(
+        llr, timeout_s=timeout_s, trace=lambda message: print(f"  {message}")
+    )
+    print(
+        "  actual: "
+        f"success={response.success} syndrome={response.syndrome_pass} "
+        f"failure={response.failure} iterations={response.iterations} "
+        f"cycles={response.cycles} saturation={response.saturation} "
+        f"words={response.raw_words.size} "
+        f"decoded_sha256={_array_sha256(response.decoded_bits)}"
+    )
+    print(f"Stage E: output validation ({name})")
     errors = _check_response(name, response, golden)
     if errors:
         print(f"FAIL {name}")
@@ -102,13 +171,35 @@ def main() -> int:
         hwhfile = args.overlay_dir / "ccsds_ldpc_pynq_z2.hwh"
 
     ar4ja, _bpsk_awgn, _ldpc_encoder, _decode = _load_models()
-    decoder = PynqLdpcDecoder(bitfile, hwhfile=hwhfile)
-    print(f"Bitstream loaded: {decoder.overlay.is_loaded()}")
-    print(f"Available IP: {sorted(decoder.overlay.ip_dict)}")
-    print(f"DMA initialized: {decoder.dma_name}")
-
-    passed = True
     zero_payload = np.zeros(ar4ja.INFO_N, dtype=np.uint8)
+    _, zero_llr, _ = _frame_from_payload(zero_payload)
+
+    print("Stage A: overlay metadata and DMA discovery")
+    print(f"  bitstream: {bitfile.expanduser().resolve()}")
+    print(f"  hardware metadata: {hwhfile.expanduser().resolve()}")
+    decoder = PynqLdpcDecoder(bitfile, hwhfile=hwhfile)
+    print(f"  overlay loaded: {decoder.overlay.is_loaded()}")
+    print(f"  available addressable IP: {sorted(decoder.overlay.ip_dict)}")
+    print(f"  DMA: {decoder.dma_name}")
+    print(
+        "  channels: "
+        f"send={hasattr(decoder.dma, 'sendchannel')} "
+        f"receive={hasattr(decoder.dma, 'recvchannel')}"
+    )
+
+    print("Stage B: contiguous buffer allocation")
+    _validate_buffer_allocation(zero_llr)
+
+    print("Stage C: DMA engine initialization")
+    print(f"  {decoder.format_dma_status()}")
+    print(
+        "  channel state: "
+        f"MM2S running={decoder.dma.sendchannel.running} idle={decoder.dma.sendchannel.idle}; "
+        f"S2MM running={decoder.dma.recvchannel.running} idle={decoder.dma.recvchannel.idle}"
+    )
+
+    print("Stage D: minimal valid DMA transfer")
+    passed = True
     passed &= _run_frame(decoder, "zero_noiseless", zero_payload, args.timeout)
 
     rng = np.random.default_rng(args.seed)

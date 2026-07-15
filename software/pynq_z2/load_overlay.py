@@ -23,10 +23,21 @@ def main() -> int:
     if not bitfile.is_file() or not hwhfile.is_file():
         raise FileNotFoundError(f"matching .bit/.hwh not found in {overlay_dir}")
 
+    print(f"Bitstream path: {bitfile}", flush=True)
+    print(f"Hardware metadata path: {hwhfile}", flush=True)
+    print("Programming FPGA...", flush=True)
     overlay = Overlay(str(bitfile), download=True)
     ip_names = sorted(overlay.ip_dict)
-    print(f"Bitstream loaded: {overlay.is_loaded()}")
-    print(f"Available IP: {ip_names}")
+    print("FPGA programming completed")
+    print(f"Overlay loaded: {overlay.is_loaded()}")
+    print("Available addressable IP:")
+    for name in ip_names:
+        description = overlay.ip_dict[name]
+        print(
+            f"  {name}: type={description.get('type', '<unknown>')} "
+            f"base={description.get('phys_addr', '<none>')} "
+            f"range={description.get('addr_range', '<none>')}"
+        )
     if not overlay.is_loaded():
         raise RuntimeError("PYNQ reports that the bitstream is not loaded")
     if EXPECTED_DMA not in overlay.ip_dict:
@@ -36,6 +47,7 @@ def main() -> int:
     for channel in ("sendchannel", "recvchannel"):
         if not hasattr(dma, channel):
             raise RuntimeError(f"{EXPECTED_DMA} is missing {channel}")
+    print(f"Expected DMA: {EXPECTED_DMA}")
     print("DMA initialized: MM2S and S2MM channels are available")
     print("LOAD-ONLY PASS (decoder functionality not tested)")
     return 0

@@ -1,11 +1,16 @@
 # Repository Status
 
-Last updated: July 9, 2026.
+Last updated: July 15, 2026.
 
 > Note: sections dated "July 5, 2026" below predate the local Vivado install.
 > Vivado 2025.2 was installed on July 7 and a partial out-of-context synthesis
 > was attempted; see **Vivado Status (July 7, 2026)** at the end of this file
 > and `docs/SYNTHESIS.md` for the authoritative synthesis state.
+
+Current superseding status: the complete 100 MHz PYNQ-Z2 overlay closes timing,
+programs successfully, and has passed one deterministic zero-noise frame through
+physical AXI DMA. Older issue lists below are retained as development history;
+`docs/PYNQ_Z2_BRINGUP.md` is authoritative for the board result.
 
 ## Completed And Verified Locally
 
@@ -25,6 +30,21 @@ Last updated: July 9, 2026.
 - `make lint`.
 - `make test`, including `LANES=1`, `LANES=8`, and `LANES=16` core RTL sims.
 - Open-source GitHub Actions workflow for generation, lint, and regression.
+
+## Completed And Verified On Physical Hardware
+
+- TUL PYNQ-Z2 / `xc7z020clg400-1` overlay programming at the implemented
+  100 MHz clock.
+- `axi_dma_0` discovery and MM2S/S2MM initialization.
+- 2048-byte MM2S and 160-byte S2MM transfers, both completing with DMASR
+  `0x00001002` (idle and IOC interrupt).
+- Minimal zero-noise frame decode with status `success=1`, `syndrome=1`,
+  `failure=0`, `iterations=0`, `cycles=2625`, and `saturation=0`.
+- All 1024 decoded bits matched the golden output SHA-256
+  `5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef`.
+
+This physical coverage is one deterministic all-zero vector. Additional RTL
+simulation coverage is not claimed as additional board coverage.
 
 ## Architecture Found
 
@@ -75,87 +95,23 @@ now exposes full-beat `TKEEP` on both streams for AXI DMA integration.
 - Added PYNQ-Z2 Python driver, smoke test, benchmark, and local packing tests.
 - Added board-readiness audit and PYNQ-Z2 bring-up documentation.
 
-## Local Verification Results
+## Current Verification Results
 
-Commands run:
+- `make test`: pass, including Python unit tests and `LANES=1/8/16` core RTL
+  simulations.
+- `make lint`: pass for the FPGA-facing top, assertion-enabled top, and
+  syndrome checker.
+- AXI wrapper simulation: pass with valid frames, `TKEEP`, malformed framing,
+  backpressure, and recovery cases.
+- Complete PYNQ-Z2 implementation: fully routed at 100 MHz with setup WNS
+  `+0.091 ns`, setup TNS `0.000 ns`, hold WHS `+0.018 ns`, and hold THS
+  `0.000 ns`; no DRC errors or critical warnings.
+- Physical PYNQ-Z2 minimal-vector smoke test: pass as recorded above.
 
-```sh
-make test
-make regression
-make lint
-make synth FPGA_PART=xc7a35tcsg324-1
-make impl FPGA_PART=xc7a35tcsg324-1
-make package-ip FPGA_PART=xc7a35tcsg324-1
-make synth FPGA_PART=xc7z020clg400-1
-yosys -q -l results/reports/yosys_synth.log fpga/yosys_synth.ys
-```
+Future physical validation includes consecutive frames, randomized/noisy
+vectors, reset/error recovery, throughput benchmarking, and BER/FER sweeps.
 
-Observed results:
-
-- `make lint`: pass
-- `make test`/`make regression`: pass after the regression update
-- `LANES=1` core sim: pass, 11 vectors
-- `LANES=8` core sim: pass, 11 vectors
-- `LANES=16` core sim: pass, 11 vectors
-- AXI wrapper sim: pass, including `TKEEP`, malformed-frame recovery, and
-  reset-after-incomplete-input coverage
-- PYNQ-Z2 packing/parsing unit tests: pass as part of `make test`
-- Yosys: fail on generated SystemVerilog package syntax in Yosys 0.9
-- `make synth`/`make impl`/`make package-ip`: fail cleanly because Vivado is
-  not installed locally
-- `make pynq-z2-*`: not run to Vivado because Vivado is not installed locally
-- Vivado synthesis: not run because Vivado is not installed
-- Vivado implementation: not run because Vivado is not installed
-
-## Completed But Not Vendor-Synthesized
-
-- RTL source ordering and FPGA-facing top are prepared.
-- Vivado OOC synthesis and implementation scripts are prepared.
-- Vivado IP packaging script is prepared.
-- PYNQ-Z2 block-design build script is prepared.
-- PYNQ-Z2 overlay package script is prepared.
-- Clock constraint for standalone OOC synthesis is prepared.
-
-These items still require a machine with Vivado and, for board hardware, the
-PYNQ-Z2 board files installed.
-
-## Requires Vivado/PYNQ-Z2 Board Files
-
-- Project creation and block-design validation in Vivado.
-- PYNQ-Z2 synthesis and implementation.
-- Timing, utilization, DRC, CDC, and RAM inference report review.
-- Bitstream and `.hwh` export.
-
-## Requires Physical Hardware
-
-- Bitstream programming.
-- ILA capture.
-- DMA transfer validation.
-- Known-answer vector execution on hardware.
-- Consecutive-frame hardware test.
-- Noisy/randomized hardware vectors.
-
-## Board-Readiness Assessment
-
-The repository is prepared for the first PYNQ-Z2 Vivado/PYNQ bring-up path, but
-it is not yet physically board-validated and does not have real vendor
-utilization or timing numbers. The next user actions are:
-
-```sh
-make pynq-z2-project
-make pynq-z2-synth
-make pynq-z2-bitstream
-make pynq-z2-overlay
-```
-
-Then copy `results/pynq_z2/overlay/` to the board and run:
-
-```sh
-python3 smoke_test.py
-python3 benchmark.py --frames 10
-```
-
-## Vivado Status (July 12, 2026)
+## Vivado And Board Status (July 15, 2026)
 
 This supersedes the earlier "did not complete / ~94k flip-flops" notes.
 
@@ -174,8 +130,10 @@ This supersedes the earlier "did not complete / ~94k flip-flops" notes.
 - Evidence (OOC, tool-reported, not gitted — regenerate via
   `experiments/synthesis/impl_ip_timing.tcl`):
   `experiments/synthesis/results/impl_ip_strong/{timing_postroute.rpt,util.rpt}`.
-- **Not done:** bitstream generation, PYNQ-Z2 board bring-up, on-hardware testing,
-  measured hardware throughput/BER.
+- The complete PS/AXI-DMA overlay bitstream and HWH were generated and deployed.
+- Physical programming and the minimal end-to-end DMA known-answer test pass.
+- **Not done:** measured hardware throughput/BER, noisy/randomized board vectors,
+  consecutive-frame stress, or ILA-based signal capture.
 - Toolchain note: the AXI wrapper, core decoder (`LANES=1/8/16`), and syndrome
   sims all build and pass under the installed Icarus 14. (An enum ternary at
   `rtl/ldpc_axis_wrapper.sv:285` that previously failed to elaborate under

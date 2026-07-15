@@ -110,15 +110,27 @@ PL-to-host output:
 ## Running On The Board
 
 Use `scripts/board/deploy_pynq.sh` to copy the runtime subset to the PYNQ-Z2.
-The build-tested command sequence, evidence paths, and current SSH blocker are
-in `docs/PYNQ_Z2_BRINGUP.md`. From the deployed directory on the board:
+The tested command sequence and evidence are in `docs/PYNQ_Z2_BRINGUP.md`.
+From the deployed directory in a root-capable board shell, use the image's PYNQ
+virtual environment and XRT runtime explicitly:
 
 ```sh
-python3 load_overlay.py
-python3 smoke_test.py
-python3 smoke_test.py --random-frames 3
-python3 benchmark.py --frames 10
+XILINX_XRT=/usr /usr/local/share/pynq-venv/bin/python3 load_overlay.py
+XILINX_XRT=/usr /usr/local/share/pynq-venv/bin/python3 smoke_test.py
 ```
+
+The following extended commands are available but have not yet been run on the
+physical board:
+
+```sh
+XILINX_XRT=/usr /usr/local/share/pynq-venv/bin/python3 smoke_test.py --random-frames 3
+XILINX_XRT=/usr /usr/local/share/pynq-venv/bin/python3 benchmark.py --frames 10
+```
+
+Raw SSH `python3` is not the virtualenv interpreter on the tested PynqLinux 3.0
+image. The verified hardware workflow runs these commands from the existing
+root Jupyter terminal, which has access to the root-owned FPGA and DMA devices.
+No device permissions or sudo policy were changed.
 
 The smoke test:
 
@@ -131,6 +143,32 @@ The smoke test:
 
 The benchmark reports Python + AXI DMA + decoder wall-clock time. It does not
 claim pure decoder-core latency.
+
+## Verified Physical Result
+
+The July 15, 2026 PYNQ-Z2 run loaded the 100 MHz overlay and discovered
+`axi_dma_0`. A 2048-byte MM2S transfer and 160-byte S2MM transfer both completed
+with DMASR `0x00001002` (idle and IOC interrupt). The deterministic vector was
+1024 zero payload bits encoded to 2048 zero transmitted bits, mapped to 2048
+LLRs of `+32`, and packed into 512 words of `0x20202020`.
+
+Expected and observed decoder status matched:
+
+```text
+success=1 syndrome=1 failure=0 iterations=0 saturation=0
+```
+
+The physical decoder reported `cycles=2625` and returned all 40 response words.
+The expected and actual 1024-bit decoded-output SHA-256 were identical:
+
+```text
+5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef
+```
+
+This physical result covers one minimal all-zero, zero-noise frame. RTL
+simulation covers additional deterministic and malformed-frame cases, but those
+are not additional physical-board results. Random/noisy hardware vectors,
+consecutive-frame stress, BER/FER, and throughput remain unmeasured.
 
 ## Packaging Existing Artifacts
 

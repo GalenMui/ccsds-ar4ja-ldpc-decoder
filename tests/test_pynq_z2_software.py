@@ -7,6 +7,7 @@ from software.pynq_z2.ccsds_ldpc_pynq import (
     MAGIC,
     OUTPUT_WORDS,
     TX_N,
+    format_dma_status,
     pack_decoded_bits_to_words,
     pack_llrs_to_words,
     unpack_response_words,
@@ -61,3 +62,11 @@ def test_response_parser_rejects_bad_magic():
 
     with pytest.raises(ValueError, match="bad response magic"):
         unpack_response_words(words)
+
+
+def test_dma_status_formatter_decodes_channel_flags():
+    assert format_dma_status(0x00001002) == "0x00001002 (idle, ioc_irq)"
+    assert format_dma_status(0x00004041) == (
+        "0x00004041 (halted, decode_error, error_irq)"
+    )
+    assert format_dma_status(None) == "unavailable"

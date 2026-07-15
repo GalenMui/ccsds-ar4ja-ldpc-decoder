@@ -43,6 +43,9 @@ Implemented:
 - Tcl-based PYNQ-Z2 Vivado block-design flow and PYNQ host software.
 - Timing-closed PYNQ-Z2 bitstream, hardware handoff, deployment script, and
   load-only/functional board smoke-test scripts.
+- Physical PYNQ-Z2 validation of overlay programming and one deterministic
+  zero-noise frame through AXI DMA, with all 1024 decoded bits matching the
+  golden model.
 - Icarus regression tests and board-independent DMA packing/parsing utility.
 - Vivado Tcl templates and an attempted Yosys flow.
 
@@ -56,6 +59,9 @@ Current limitations:
   so open-source generic synthesis is blocked by tool support here.
 - The AXI-Stream wrapper, core decoder, and syndrome simulations all build and
   pass under the installed Icarus 14 toolchain.
+- Physical-board coverage currently consists of the minimal all-zero,
+  zero-noise frame only; randomized/noisy frames, consecutive transfers,
+  hardware BER/FER, and throughput benchmarking remain future work.
 
 ## Timing / Resources (Vivado 2025.2, xc7z020clg400-1, OOC)
 
@@ -80,10 +86,28 @@ MHz). Reproduce with `experiments/synthesis/impl_ip_timing.tcl` (default) or the
 directed strategy documented in `docs/SYNTHESIS_MEMORY_ANALYSIS.md`.
 
 The complete PYNQ-Z2 PS/AXI-DMA design also closes at 100 MHz and produces a
-bitstream (WNS +0.091 ns, TNS 0; hold WHS +0.018 ns, THS 0). Physical-board
-loading and end-to-end DMA testing still require an unlocked SSH key; no
-on-hardware throughput or BER is claimed. Numbers above remain tool-reported
-OOC results, not board measurements.
+bitstream (WNS +0.091 ns, TNS 0; hold WHS +0.018 ns, THS 0). On physical
+hardware, the overlay loaded, `axi_dma_0` completed both channels with status
+`0x00001002`, and the minimal zero-noise frame decoded correctly in 2,625
+decoder cycles. No on-hardware throughput or BER is claimed. Timing numbers
+remain tool-reported implementation results; the cycle count and decoded result
+are physical-board observations.
+
+## Physical PYNQ-Z2 Result
+
+The verified 100 MHz `xc7z020clg400-1` overlay accepted 512 input words
+(2048 LLR bytes, all `+32`) and returned 40 output words (160 bytes). Observed
+decoder status was `success=1`, `syndrome=1`, `failure=0`, `iterations=0`,
+`cycles=2625`, and `saturation=0`. The actual 1024-bit decoded-output SHA-256
+matched the expected hash:
+
+```text
+5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef
+```
+
+This is one deterministic all-zero, zero-noise hardware vector. See
+`docs/PYNQ_Z2_BRINGUP.md` for the privileged root Jupyter terminal workflow,
+DMA register results, and explicit remaining coverage gaps.
 
 ## Fixed-Point Rules
 
@@ -263,13 +287,21 @@ Deploy the runtime subset without deleting unrelated board files:
 ./scripts/board/deploy_pynq.sh
 ```
 
-Then run the load-only test before the functional DMA test:
+The deployment script detects the board's PYNQ virtual environment and XRT
+runtime. Its optional run modes are available when the SSH target has an
+administrator-approved noninteractive hardware runner:
 
 ```sh
-python3 load_overlay.py
-python3 smoke_test.py
-python3 benchmark.py --frames 10
+./scripts/board/deploy_pynq.sh --load
+./scripts/board/deploy_pynq.sh --smoke-test
 ```
+
+On PynqLinux 3.0, raw noninteractive SSH resolves `/usr/bin/python3`; use
+`XILINX_XRT=/usr /usr/local/share/pynq-venv/bin/python3` for PYNQ scripts.
+On the verified board, deployment over SSH remains unprivileged and hardware
+access uses the image's existing root Jupyter terminal. See
+`docs/PYNQ_Z2_BRINGUP.md` for the tested environment probe, exact commands, and
+measured board result.
 
 See `docs/PYNQ_Z2_BRINGUP.md`, `docs/PYNQ_Z2.md`, and
 `docs/BOARD_READINESS_AUDIT.md`.

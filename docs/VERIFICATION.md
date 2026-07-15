@@ -96,18 +96,15 @@ and indexed-array sensitivity diagnostics:
 
 ## Current Local Results
 
-Last verified July 9, 2026 on the installed oss-cad-suite toolchain
+Last verified July 15, 2026 on the installed oss-cad-suite toolchain
 (Icarus 14) and Vivado 2025.2:
 
-- Python unit tests (`pytest tests/`): **31 passed**.
+- Python unit tests (`pytest tests/`): **32 passed**.
 - Syndrome-checker RTL sim (`tb_syndrome_checker`): pass, 5 vectors.
 - Core decoder RTL sim, all 11 vectors:
-  - `LANES=8`: pass (runtime ~90 s; exceeds the 60 s cap in
-    `scripts/run_regression.py`, so the automated step is flagged as a timeout
-    even though the simulation completes and passes).
-  - `LANES=16`: pass (runtime ~1.5 min; worst-case 15,616 cycles).
-  - `LANES=1`: generated schedule present; slow to simulate (worst-case
-    ~249k cycles) and covered by the regression's 180 s step.
+  - `LANES=8`: pass; worst-case vector uses 50,249 cycles.
+  - `LANES=16`: pass; worst-case vector uses 25,129 cycles.
+  - `LANES=1`: pass; worst-case vector uses 401,929 cycles.
 - AXI wrapper RTL sim (`tb_ldpc_axis_wrapper`, LANES=8): **pass** under the
   installed Icarus 14 (~30 s), covering valid frames, valid gaps, output
   backpressure, stable stalled output, consecutive frames, early `TLAST`,
@@ -117,9 +114,9 @@ Last verified July 9, 2026 on the installed oss-cad-suite toolchain
   `wrapper_state_t'(...)` cast around the whole expression.)
 - `yosys -q -l results/reports/yosys_synth.log fpga/yosys_synth.ys`: fail on
   the generated SystemVerilog package in Yosys 0.9.
-- Vivado 2025.2: installed; smoke passes; a `LANES=8` out-of-context synthesis
-  was attempted but did not complete (see `docs/SYNTHESIS.md`). No vendor
-  timing/utilization numbers exist.
+- Vivado 2025.2: the complete PYNQ-Z2 PS/AXI-DMA implementation is fully routed
+  at 100 MHz with setup WNS `+0.091 ns` and hold WHS `+0.018 ns`; the build has
+  no DRC errors or critical warnings.
 - Verilator: installed (oss-cad-suite) but not currently wired into the lint
   flow, which uses Icarus.
 
@@ -128,11 +125,28 @@ at Eb/N0 = 2.0 dB, not a performance sweep; no BER/FER curve is claimed. The
 optional plot step is skipped when the local matplotlib/numpy stack is unusable.
 That skip does not affect decoder correctness.
 
+## Physical PYNQ-Z2 Validation
+
+The physical-board result is separate from the simulations above. From the
+root Jupyter terminal, the PYNQ-Z2 loaded the overlay, discovered `axi_dma_0`,
+and completed a 2048-byte MM2S transfer plus a 160-byte S2MM transfer. Both
+channels ended at DMASR `0x00001002` (idle and IOC interrupt).
+
+The sole physical vector so far is the deterministic all-zero, zero-noise frame:
+1024 zero payload bits, 2048 LLRs of `+32`, and 512 DMA words of `0x20202020`.
+Observed status was `success=1`, `syndrome=1`, `failure=0`, `iterations=0`,
+`cycles=2625`, `saturation=0`, with 40 output words. The expected and actual
+decoded hashes matched:
+
+```text
+5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef
+```
+
 ## Remaining Verification Gaps
 
-- Vendor synthesis and timing reports
 - Post-synthesis or post-route simulation
 - Reset-during-decode/output randomized tests
 - Cycle-by-cycle internal trace comparison
 - Long BER/FER sweeps
-- Physical-board DMA validation
+- Randomized/noisy and consecutive-frame physical-board testing
+- Physical-board throughput and BER/FER measurement

@@ -1,5 +1,12 @@
 # Board Readiness Audit
 
+> Post-audit update, July 15, 2026: the complete 100 MHz PYNQ-Z2 overlay was
+> programmed successfully and passed the repository's minimal zero-noise AXI
+> DMA known-answer test. Both DMA channels completed with DMASR `0x00001002`,
+> the decoder reported 2,625 cycles, and all 1024 output bits matched the golden
+> hash. This audit remains useful as the pre-hardware contract review; measured
+> board evidence and current limitations are in `docs/PYNQ_Z2_BRINGUP.md`.
+
 Last updated: July 5, 2026.
 
 ## Architecture Found
@@ -138,17 +145,19 @@ Observed results:
   bad `TKEEP`, reset after incomplete input, and malformed-then-valid recovery.
 - Yosys 0.9: fails before elaboration on the generated SystemVerilog package.
 
-Update (July 7, 2026): Vivado 2025.2 was subsequently installed. `make
+Historical update (July 7, 2026): Vivado 2025.2 was subsequently installed. `make
 vivado-smoke` passes and the `LANES=8` IP elaborates cleanly, but a logged
 out-of-context `synth_design` run did **not** complete on the 12 GB host — it
 reached technology mapping after ~1.5 h and produced no reports or checkpoint
-(`reports/vivado/synth_ip.log`). PYNQ-Z2 synthesis, implementation, timing,
-utilization, DRC, CDC, and bitstream generation have not been run. The
-bitstream target stays gated on `constraints/pynq_z2.xdc` being marked
-`STATUS: VERIFIED` (currently `UNVERIFIED`).
+(`reports/vivado/synth_ip.log`). At that time, PYNQ-Z2 synthesis,
+implementation, timing, utilization, DRC, CDC, and bitstream generation had not
+been run. Those historical gates were subsequently cleared by the completed
+build and physical result described above.
 
-No hardware throughput, timing closure, utilization, or board-validation
-results are claimed.
+Superseding update (July 15, 2026): later builds completed the 100 MHz
+implementation and physical minimal-vector smoke test described at the top of
+this audit. Hardware throughput, BER/FER, noisy/randomized frames, and extended
+board stress are still not claimed.
 
 ## Implementation Risks To Inspect In Vivado
 

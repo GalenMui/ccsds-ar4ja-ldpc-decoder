@@ -25,17 +25,17 @@ The sequential run above is the valid pre-parallel baseline.
 Decoder core, `LANES=8` default:
 
 ```text
-PASS vector=0 success=1 iter=0 sat=0 cycles=480
-PASS vector=1 success=1 iter=1 sat=0 cycles=4320
-PASS vector=2 success=1 iter=1 sat=0 cycles=4320
-PASS vector=3 success=1 iter=1 sat=0 cycles=4320
-PASS vector=4 success=1 iter=1 sat=0 cycles=4320
-PASS vector=5 success=1 iter=1 sat=0 cycles=4320
-PASS vector=6 success=1 iter=1 sat=0 cycles=4320
-PASS vector=7 success=1 iter=2 sat=2131 cycles=8160
-PASS vector=8 success=1 iter=3 sat=8078 cycles=12000
-PASS vector=9 success=1 iter=3 sat=8094 cycles=12000
-PASS vector=10 success=0 iter=8 sat=0 cycles=31200
+PASS vector=0 success=1 iter=0 sat=0 cycles=2625
+PASS vector=1 success=1 iter=1 sat=0 cycles=8578
+PASS vector=2 success=1 iter=1 sat=0 cycles=8578
+PASS vector=3 success=1 iter=1 sat=0 cycles=8578
+PASS vector=4 success=1 iter=1 sat=0 cycles=8578
+PASS vector=5 success=1 iter=1 sat=0 cycles=8578
+PASS vector=6 success=1 iter=1 sat=0 cycles=8578
+PASS vector=7 success=1 iter=2 sat=2131 cycles=14531
+PASS vector=8 success=1 iter=3 sat=8078 cycles=20484
+PASS vector=9 success=1 iter=3 sat=8094 cycles=20484
+PASS vector=10 success=0 iter=8 sat=0 cycles=50249
 ```
 
 AXI wrapper:
@@ -56,62 +56,62 @@ PASS axis vector=0 after malformed frame and reset
 Additional supported-lane core simulations now run in `make test`:
 
 ```text
-LANES=1:  PASS 11 decoder vectors, max-iteration failure cycles=249376
-LANES=16: PASS 11 decoder vectors, max-iteration failure cycles=15616
+LANES=1:  PASS 11 decoder vectors, max-iteration failure cycles=401929
+LANES=16: PASS 11 decoder vectors, max-iteration failure cycles=25129
 ```
 
 ## Cycle Summary
 
 | Case | LANES=1 | LANES=8 default | LANES=16 |
 | --- | ---: | ---: | ---: |
-| Initial all-zero pass | 3,616 | 480 | 256 |
-| One iteration | 34,336 | 4,320 | 2,176 |
-| Two iterations | 65,056 | 8,160 | 4,096 |
-| Three iterations | 95,776 | 12,000 | 6,016 |
-| Eight-iteration failure | 249,376 | 31,200 | 15,616 |
+| Initial all-zero pass | 20,993 | 2,625 | 1,313 |
+| One iteration | 68,610 | 8,578 | 4,290 |
+| Two iterations | 116,227 | 14,531 | 7,267 |
+| Three iterations | 163,844 | 20,484 | 10,244 |
+| Eight-iteration failure | 401,929 | 50,249 | 25,129 |
 
 At a hypothetical 100 MHz clock, the eight-iteration failure case is about
-0.312 ms for the default `LANES=8` build. This is a simulation-derived cycle
-count, not a timing result.
+0.502 ms for the default `LANES=8` build. This is a simulation-derived cycle
+count, not a physical latency measurement. The physical zero-vector run also
+reported 2,625 decoder cycles, but only that single vector has been compared
+between simulation and hardware.
 
-## Synthesis Status
+## PYNQ-Z2 Implementation Status
 
-Vivado was not installed in this environment, so no vendor utilization, RAM
-inference, or timing reports were produced.
+Vivado 2025.2 produced the complete `xc7z020clg400-1` PS/AXI-DMA overlay. The
+100 MHz implementation closed timing with setup WNS `+0.091 ns`, setup TNS
+`0.000 ns`, hold WHS `+0.018 ns`, and hold THS `0.000 ns`. Detailed evidence is
+listed in `docs/PYNQ_Z2_BRINGUP.md`.
 
-The PYNQ-Z2 board-level Vivado flow is prepared under `boards/pynq_z2/`, but
-was not run here because Vivado is unavailable.
-
-The guarded Make targets were exercised with a sample part and stopped with the
-expected tool-unavailable error:
-
-```text
-make synth FPGA_PART=xc7a35tcsg324-1      -> Vivado not found
-make impl FPGA_PART=xc7a35tcsg324-1       -> Vivado not found
-make package-ip FPGA_PART=xc7a35tcsg324-1 -> Vivado not found
-make synth FPGA_PART=xc7z020clg400-1      -> Vivado not found
-```
-
-Yosys is installed, but the local build fails while parsing the generated
-SystemVerilog package:
-
-```text
-rtl/ar4ja_1024_pkg.sv:3: ERROR: syntax error, unexpected TOK_ID, expecting '='
-```
-
-No LUT, FF, BRAM, DSP, Fmax, slack, or power numbers are claimed yet.
+These are vendor implementation results. They are distinct from RTL simulation
+cycle counts and from the physical-board observation below.
 
 ## BER/FER Smoke
 
 The regression still runs the deterministic one-frame BER/FER smoke. It is a
 script health check only, not a communication-performance result.
 
-## Missing Hardware Results
+## Physical PYNQ-Z2 Hardware Result
 
-- Vivado out-of-context synthesis.
-- RAM inference inspection.
-- Timing summary at 100 MHz.
+The July 15, 2026 root-Jupyter-terminal run programmed the 100 MHz overlay,
+discovered `axi_dma_0`, and passed one end-to-end deterministic DMA decode:
+
+```text
+input:  1024 zero payload bits -> 2048 LLRs of +32 -> 512 x 0x20202020
+MM2S:   2048 bytes, DMASR 0x00001002 (idle, ioc_irq)
+S2MM:    160 bytes, DMASR 0x00001002 (idle, ioc_irq)
+status: success=1 syndrome=1 failure=0 iterations=0 cycles=2625 saturation=0
+output: 40 words, decoded SHA-256 match
+hash:   5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef
+```
+
+This confirms physical programming, DMA movement in both directions, framing
+for the minimal valid frame, and exact decoded data for one zero-noise vector.
+
+## Remaining Validation Gaps
+
+- Randomized and noisy physical-board vectors.
+- Consecutive-frame and reset-recovery hardware stress.
+- Hardware BER/FER sweeps and throughput measurements.
 - Post-synthesis or post-route simulation.
-- Board DMA test.
-- PYNQ-Z2 smoke test and benchmark on physical hardware.
-- Long BER/FER sweeps.
+- Other code rates, block sizes, and physical lane configurations.
