@@ -14,9 +14,12 @@ PYNQ_Z2_OVERLAY_DIR ?= build/pynq_z2/deploy
 
 VIVADO_SETTINGS ?= /tools/AMD/2025.2/Vivado/settings64.sh
 
+BENCH_RESULTS ?= results/hardware/ber_fer.jsonl
+
 .PHONY: help generate test phase1_3 phase4_6 regression lint synth impl package-ip \
 	pynq-z2-project pynq-z2-synth pynq-z2-bitstream pynq-z2-overlay \
 	pynq-z2-package clean \
+	benchmark-selftest pynq-z2-benchmark-cmds pynq-z2-analyze \
 	vivado-smoke vivado-synth-ip vivado-synth-pynq-z2 vivado-impl-pynq-z2 \
 	vivado-bitstream clean-vivado
 
@@ -35,6 +38,10 @@ help:
 	@echo "  make pynq-z2-synth     - run PYNQ-Z2 project synthesis"
 	@echo "  make pynq-z2-bitstream - implement and generate the PYNQ-Z2 bitstream"
 	@echo "  make pynq-z2-overlay   - package .bit/.hwh and PYNQ Python files"
+	@echo "  --- hardware benchmark suite ---"
+	@echo "  make benchmark-selftest      - offline harness self-check (software model)"
+	@echo "  make pynq-z2-benchmark-cmds  - print exact board benchmark commands"
+	@echo "  make pynq-z2-analyze BENCH_RESULTS=<jsonl> - aggregate retrieved results"
 	@echo "  --- staged PYNQ-Z2 board bring-up (scripts/vivado) ---"
 	@echo "  make vivado-smoke          - check Vivado + target part are available"
 	@echo "  make vivado-synth-ip       - OOC synth of the decoder IP top"
@@ -105,6 +112,41 @@ pynq-z2-bitstream: generate
 
 pynq-z2-package:
 	$(PYTHON) boards/pynq_z2/scripts/package_overlay.py --output-dir $(PYNQ_Z2_OVERLAY_DIR)
+
+# -----------------------------------------------------------------------------
+# Hardware benchmark suite (software/pynq_z2/benchmark.py).
+# `benchmark-selftest` validates the whole harness offline with the bit-accurate
+# software model (source="software-model", never a hardware claim).  The real
+# measurements run on the board's root Jupyter terminal; `pynq-z2-benchmark-cmds`
+# prints the exact commands.  `pynq-z2-analyze` aggregates a retrieved JSONL.
+# -----------------------------------------------------------------------------
+benchmark-selftest:
+	@mkdir -p results/selftest
+	$(PYTHON) -m software.pynq_z2.benchmark ber-fer --simulate \
+		--ebn0 3.5 --frames 3 --min-frames 1 \
+		--output results/selftest/ber_fer.jsonl
+	$(PYTHON) -m software.pynq_z2.benchmark throughput --simulate \
+		--frames 3 --warmup 1 --noiseless \
+		--output results/selftest/throughput.json
+	$(PYTHON) scripts/plot_benchmark.py csv results/selftest/ber_fer.jsonl
+
+pynq-z2-benchmark-cmds:
+	@echo "Run from the PYNQ-Z2 root Jupyter terminal, in the deployed directory:"
+	@echo "  cd /home/xilinx/jupyter_notebooks/ccsds_ar4ja_ldpc_decoder"
+	@echo "  XILINX_XRT=/usr /usr/local/share/pynq-venv/bin/python3 benchmark.py correctness \\"
+	@echo "      --output results/hardware/correctness.jsonl"
+	@echo "  XILINX_XRT=/usr /usr/local/share/pynq-venv/bin/python3 benchmark.py ber-fer \\"
+	@echo "      --ebn0 1.0 1.5 2.0 2.5 3.0 --frames 200 --max-frame-errors 60 --resume \\"
+	@echo "      --output results/hardware/ber_fer.jsonl"
+	@echo "  XILINX_XRT=/usr /usr/local/share/pynq-venv/bin/python3 benchmark.py throughput \\"
+	@echo "      --frames 500 --noiseless --output results/hardware/throughput.json"
+	@echo "  XILINX_XRT=/usr /usr/local/share/pynq-venv/bin/python3 benchmark.py soak \\"
+	@echo "      --minutes 15 --checkpoint-every 500 --output results/hardware/soak.jsonl"
+	@echo "Retrieve results over unprivileged SSH, then: make pynq-z2-analyze BENCH_RESULTS=<file>"
+
+pynq-z2-analyze:
+	$(PYTHON) scripts/plot_benchmark.py csv $(BENCH_RESULTS)
+	@echo "For plots: $(PYTHON) scripts/plot_benchmark.py ber-fer $(BENCH_RESULTS)"
 
 pynq-z2-overlay: pynq-z2-bitstream
 	$(PYTHON) boards/pynq_z2/scripts/package_overlay.py --output-dir $(PYNQ_Z2_OVERLAY_DIR)

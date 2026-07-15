@@ -298,3 +298,67 @@ class PynqLdpcDecoder:
         return self.decode_words(
             pack_llrs_to_words(llrs), timeout_s=timeout_s, trace=trace
         )
+
+    # -- reusable-buffer fast path ----------------------------------------
+    # decode_words() above allocates a fresh contiguous buffer pair per call and
+    # stays the proven smoke-test path.  For steady-state benchmarking, allocate
+    # the buffers once with allocate_io_buffers() and drive frames through
+    # run_prepacked(), which reuses them and returns a per-stage timing
+    # breakdown using time.perf_counter_ns().
+
+    def allocate_io_buffers(self) -> tuple[Any, Any]:
+        """Allocate one reusable (input, output) contiguous buffer pair."""
+
+        in_buf = self._allocate((INPUT_WORDS,), np.uint32)
+        out_buf = self._allocate((OUTPUT_WORDS,), np.uint32)
+        return in_buf, out_buf
+
+    def free_io_buffers(self, in_buf: Any, out_buf: Any) -> None:
+        self._free_buffer(in_buf)
+        self._free_buffer(out_buf)
+
+    def run_prepacked(
+        self,
+        input_words: Sequence[int] | np.ndarray,
+        in_buf: Any,
+        out_buf: Any,
+        *,
+        timeout_s: float = 10.0,
+        capture_status: bool = False,
+    ) -> tuple[DecoderResponse, dict[str, int | dict]]:
+        """Run one frame through preallocated buffers and time each stage.
+
+        Returns the parsed response and a timing dict with nanosecond stage
+        durations (``copy_ns``, ``submit_ns``, ``wait_ns``, ``parse_ns``,
+        ``total_ns``).  ``capture_status`` additionally records the DMA status
+        registers after completion.
+        """
+
+        words = _as_uint32_words(input_words, INPUT_WORDS)
+        timing: dict[str, int | dict] = {}
+        t0 = time.perf_counter_ns()
+        in_buf[:] = words
+        out_buf[:] = 0
+        flush = getattr(in_buf, "flush", None)
+        if callable(flush):
+            flush()
+        t1 = time.perf_counter_ns()
+        self.dma.recvchannel.transfer(out_buf)
+        self.dma.sendchannel.transfer(in_buf)
+        t2 = time.perf_counter_ns()
+        self._wait_channel(self.dma.sendchannel, "MM2S", timeout_s)
+        self._wait_channel(self.dma.recvchannel, "S2MM", timeout_s)
+        t3 = time.perf_counter_ns()
+        invalidate = getattr(out_buf, "invalidate", None)
+        if callable(invalidate):
+            invalidate()
+        response = unpack_response_words(np.asarray(out_buf, dtype=np.uint32))
+        t4 = time.perf_counter_ns()
+        timing["copy_ns"] = t1 - t0
+        timing["submit_ns"] = t2 - t1
+        timing["wait_ns"] = t3 - t2
+        timing["parse_ns"] = t4 - t3
+        timing["total_ns"] = t4 - t0
+        if capture_status:
+            timing["dma_status"] = self.dma_status()
+        return response, timing

@@ -36,6 +36,11 @@ required=(
     smoke_test.py
     benchmark.py
     ccsds_ldpc_pynq.py
+    channel.py
+    metrics.py
+    runner.py
+    vectors.py
+    experiment.py
     models
 )
 

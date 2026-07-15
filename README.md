@@ -306,6 +306,28 @@ measured board result.
 See `docs/PYNQ_Z2_BRINGUP.md`, `docs/PYNQ_Z2.md`, and
 `docs/BOARD_READINESS_AUDIT.md`.
 
+## Hardware Benchmark Suite
+
+A reproducible benchmarking and validation framework wraps the verified overlay:
+deterministic workload generation (payload → CCSDS encode → BPSK → AWGN →
+quantized int8 LLRs), a reusable buffer-reuse board runner, a bit-accurate
+software equivalence model, and a configurable CLI with machine-readable JSONL
+output.
+
+```sh
+make benchmark-selftest          # offline harness check (software model)
+make pynq-z2-benchmark-cmds      # print exact board commands
+make pynq-z2-analyze BENCH_RESULTS=results/hardware/ber_fer.jsonl
+```
+
+Experiment modes (`software/pynq_z2/benchmark.py`): `correctness`, `ber-fer`,
+`throughput`, `latency`, `soak`. Hardware runs execute from the board's root
+Jupyter terminal; `--simulate` runs the same pipeline against the software model
+and is explicitly labelled `source: "software-model"`. No hardware BER/FER or
+throughput results are claimed here beyond the single zero-noise frame in
+`docs/PYNQ_Z2_BRINGUP.md`. See `docs/BENCHMARKING.md` for conventions, the output
+schema, metric definitions, statistical stopping, and the full workflow.
+
 ## DMA Utility
 
 Pack 2048 signed int8 LLRs into 512 little-lane 32-bit words:
