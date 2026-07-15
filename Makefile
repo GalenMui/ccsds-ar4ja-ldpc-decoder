@@ -10,7 +10,7 @@ PYNQ_Z2_PART ?= xc7z020clg400-1
 PYNQ_Z2_CLK_MHZ ?= 100.0
 PYNQ_Z2_LANES ?= 8
 PYNQ_Z2_JOBS ?= 4
-PYNQ_Z2_OVERLAY_DIR ?= results/pynq_z2/overlay
+PYNQ_Z2_OVERLAY_DIR ?= build/pynq_z2/deploy
 
 VIVADO_SETTINGS ?= /tools/AMD/2025.2/Vivado/settings64.sh
 

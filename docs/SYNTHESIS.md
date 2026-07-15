@@ -107,7 +107,7 @@ The board-level Vivado flow is source Tcl, not a checked-in `.xpr`:
 make pynq-z2-project
 make pynq-z2-synth
 make pynq-z2-bitstream
-make pynq-z2-overlay
+make pynq-z2-package
 ```
 
 It creates:
@@ -127,9 +127,9 @@ and instantiates:
 
 The default target is `xc7z020clg400-1`, `PYNQ_Z2_CLK_MHZ=100.0`, and
 `PYNQ_Z2_LANES=8`. The script searches for an installed PYNQ-Z2 board
-definition and uses the board preset when available. Without board files, it
-falls back to the raw part and warns that the result is for structural checks
-until board files are installed.
+definition and uses the board preset when available. The tested Linux-overlay
+build uses the raw part fallback with explicit FCLK0, GP0, HP0, and address-map
+configuration; PS DDR/MIO must already have been initialized by PYNQ Linux.
 
 Board reports are written under:
 
@@ -141,8 +141,8 @@ results/pynq_z2/reports/impl/
 The overlay package target copies matching artifact names to:
 
 ```text
-results/pynq_z2/overlay/ccsds_ldpc_pynq_z2.bit
-results/pynq_z2/overlay/ccsds_ldpc_pynq_z2.hwh
+build/pynq_z2/deploy/ccsds_ldpc_pynq_z2.bit
+build/pynq_z2/deploy/ccsds_ldpc_pynq_z2.hwh
 ```
 
 ## Clock Constraint
@@ -208,11 +208,13 @@ VIVADO_MAX_THREADS=2 make synth FPGA_PART=xc7z020clg400-1
   BRAM/DSP unchanged, decode bit-identical. Fix (4) adds **+1 cycle per group**
   of latency. Details in **`docs/SYNTHESIS_MEMORY_ANALYSIS.md`** →
   "Setup-timing remediation". Do not relax the 100 MHz XDC.
-- PYNQ-Z2 project synthesis, implementation, bitstream generation, and overlay
-  export have **not** been run.
-- The bitstream target remains gated: `constraints/pynq_z2.xdc` is marked
-  `STATUS: UNVERIFIED`, and `make vivado-bitstream` refuses to run until the
-  pin/IO constraints are verified against a trusted PYNQ-Z2 source.
+- The PS/AXI-DMA PYNQ-Z2 flow has completed synthesis, implementation, and
+  bitstream/handoff export. Post-route WNS/TNS is **+0.091/0.000 ns** and hold
+  WHS/THS is **+0.018/0.000 ns** at 100 MHz; DRC has no Error or Critical
+  Warning violations and `check_timing` reports zero unconstrained endpoints.
+- `constraints/pynq_z2.xdc` remains intentionally inactive and unverified for
+  the separate PL-only LED flow. The PS/AXI-DMA overlay exposes only Zynq hard
+  DDR/FIXED_IO interfaces and uses generated PS/IP constraints.
 - Yosys 0.9 (oss-cad-suite) is installed but fails before elaboration on the
   generated SystemVerilog package:
 

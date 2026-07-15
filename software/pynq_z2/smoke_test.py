@@ -103,6 +103,9 @@ def main() -> int:
 
     ar4ja, _bpsk_awgn, _ldpc_encoder, _decode = _load_models()
     decoder = PynqLdpcDecoder(bitfile, hwhfile=hwhfile)
+    print(f"Bitstream loaded: {decoder.overlay.is_loaded()}")
+    print(f"Available IP: {sorted(decoder.overlay.ip_dict)}")
+    print(f"DMA initialized: {decoder.dma_name}")
 
     passed = True
     zero_payload = np.zeros(ar4ja.INFO_N, dtype=np.uint8)

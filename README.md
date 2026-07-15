@@ -41,6 +41,8 @@ Implemented:
 - Board-facing `aclk`/`aresetn` wrapper for Vivado-style IP integration.
 - Explicit AXI4-Stream `TKEEP` handling for AXI DMA integration.
 - Tcl-based PYNQ-Z2 Vivado block-design flow and PYNQ host software.
+- Timing-closed PYNQ-Z2 bitstream, hardware handoff, deployment script, and
+  load-only/functional board smoke-test scripts.
 - Icarus regression tests and board-independent DMA packing/parsing utility.
 - Vivado Tcl templates and an attempted Yosys flow.
 
@@ -77,9 +79,11 @@ post-route `phys_opt_design`); the default flow lands at WNS −0.056 ns (≈99.
 MHz). Reproduce with `experiments/synthesis/impl_ip_timing.tcl` (default) or the
 directed strategy documented in `docs/SYNTHESIS_MEMORY_ANALYSIS.md`.
 
-**Not yet done:** bitstream generation, PYNQ-Z2 board bring-up, on-hardware
-end-to-end testing, and measured hardware throughput/BER. Numbers above are
-tool-reported OOC implementation results, not board measurements.
+The complete PYNQ-Z2 PS/AXI-DMA design also closes at 100 MHz and produces a
+bitstream (WNS +0.091 ns, TNS 0; hold WHS +0.018 ns, THS 0). Physical-board
+loading and end-to-end DMA testing still require an unlocked SSH key; no
+on-hardware throughput or BER is claimed. Numbers above remain tool-reported
+OOC results, not board measurements.
 
 ## Fixed-Point Rules
 
@@ -231,8 +235,8 @@ out-of-context synthesis **and place & route** on the target part. Setup timing
 closes at 100 MHz (post-route WNS +0.009 ns, hold WHS +0.128 ns, 0 critical
 warnings); block RAM is inferred for the posterior and check-message memories.
 See the "Timing / Resources" table above and `docs/SYNTHESIS_MEMORY_ANALYSIS.md`
-for the full architecture/timing analysis and reproduction steps. Bitstream
-generation and board bring-up are not yet done.
+for the full architecture/timing analysis. The routed board-overlay evidence
+and exact deployment commands are in `docs/PYNQ_Z2_BRINGUP.md`.
 
 ## PYNQ-Z2 Overlay
 
@@ -244,23 +248,31 @@ First-board integration targets the TUL PYNQ-Z2
 make pynq-z2-project
 make pynq-z2-synth
 make pynq-z2-bitstream
-make pynq-z2-overlay
+make pynq-z2-package
 ```
 
 The packaged overlay appears under:
 
 ```text
-results/pynq_z2/overlay/
+build/pynq_z2/deploy/
 ```
 
-Copy that directory to the board and run:
+Deploy the runtime subset without deleting unrelated board files:
 
 ```sh
+./scripts/board/deploy_pynq.sh
+```
+
+Then run the load-only test before the functional DMA test:
+
+```sh
+python3 load_overlay.py
 python3 smoke_test.py
 python3 benchmark.py --frames 10
 ```
 
-See `docs/PYNQ_Z2.md` and `docs/BOARD_READINESS_AUDIT.md`.
+See `docs/PYNQ_Z2_BRINGUP.md`, `docs/PYNQ_Z2.md`, and
+`docs/BOARD_READINESS_AUDIT.md`.
 
 ## DMA Utility
 
@@ -286,6 +298,7 @@ all-zero frame.
 - `docs/VERIFICATION.md`
 - `docs/SYNTHESIS.md`
 - `docs/BOARD_BRINGUP.md`
+- `docs/PYNQ_Z2_BRINGUP.md`
 - `docs/PYNQ_Z2.md`
 - `docs/BOARD_READINESS_AUDIT.md`
 - `docs/REPO_STATUS.md`

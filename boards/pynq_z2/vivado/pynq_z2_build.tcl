@@ -164,13 +164,15 @@ if {[llength [info commands version]] == 0 || [llength [info commands create_pro
 }
 
 set vivado_version [version -short]
-set known_versions {2020.2 2021.1 2021.2 2022.1 2022.2 2023.1 2023.2 2024.1 2024.2 2025.1}
+set known_versions {2020.2 2021.1 2021.2 2022.1 2022.2 2023.1 2023.2 2024.1 2024.2 2025.1 2025.2}
 if {[lsearch -exact $known_versions $vivado_version] < 0} {
     warn "Vivado $vivado_version is not in the documented-tested list: $known_versions"
 }
 
 require_file [file join $repo_root rtl ldpc_sources.f]
 require_file [file join $repo_root rtl ldpc_axis_decoder_ip.sv]
+set bd_wrapper [file join $repo_root rtl board ldpc_axis_decoder_bd.v]
+require_file $bd_wrapper
 
 file mkdir $project_dir
 create_project -force $project_name $project_dir -part $part
@@ -188,6 +190,7 @@ if {$board_part ne ""} {
 
 set rtl_files [read_source_manifest $repo_root rtl/ldpc_sources.f]
 add_files -norecurse $rtl_files
+add_files -norecurse $bd_wrapper
 update_compile_order -fileset sources_1
 
 create_bd_design $bd_name
@@ -226,7 +229,7 @@ set_cell_properties_if_present $dma [list \
     CONFIG.c_s_axis_s2mm_tdata_width 32 \
 ]
 
-set decoder [create_bd_cell -type module -reference ldpc_axis_decoder_ip ldpc_axis_decoder_0]
+set decoder [create_bd_cell -type module -reference ldpc_axis_decoder_bd ldpc_axis_decoder_0]
 set_cell_properties_if_present $decoder [list \
     CONFIG.LANES $lanes \
     CONFIG.MAX_ITERS 8 \
@@ -235,7 +238,6 @@ set_cell_properties_if_present $decoder [list \
 ]
 
 set rst [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset proc_sys_reset_0]
-set_cell_properties_if_present $rst [list CONFIG.C_EXT_RESET_HIGH 0]
 
 set axi_lite_ic [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect axi_lite_interconnect]
 set_property -dict [list CONFIG.NUM_SI 1 CONFIG.NUM_MI 1] $axi_lite_ic
@@ -289,6 +291,10 @@ connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXIS_MM2S] [get_bd_intf_pins l
 connect_bd_intf_net [get_bd_intf_pins ldpc_axis_decoder_0/m_axis] [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
 
 assign_bd_address [get_bd_addr_segs axi_dma_0/S_AXI_LITE/Reg]
+foreach dma_space [list axi_dma_0/Data_MM2S axi_dma_0/Data_S2MM] {
+    assign_bd_address -target_address_space [get_bd_addr_spaces $dma_space] \
+        [get_bd_addr_segs processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM] -force
+}
 set dma_addr_seg [get_bd_addr_segs -quiet processing_system7_0/Data/SEG_axi_dma_0_Reg]
 if {[llength $dma_addr_seg] == 1} {
     set_property offset 0x40400000 $dma_addr_seg
@@ -306,6 +312,15 @@ add_files -norecurse $wrapper_path
 set_property top ${bd_name}_wrapper [current_fileset]
 update_compile_order -fileset sources_1
 
+# Use the same directed strategy that closed the unchanged decoder IP at
+# 100 MHz in the repository's measured OOC implementation.  These are normal
+# synthesis/implementation optimizations, not timing exceptions.
+set_property STEPS.SYNTH_DESIGN.ARGS.RETIMING true [get_runs synth_1]
+set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE Explore [get_runs impl_1]
+set_property STEPS.PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
+set_property STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]
+set_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE Explore [get_runs impl_1]
+
 report_compile_order -fileset sources_1 -file [file join $report_root compile_order_project.rpt]
 
 if {$target eq "synth" || $target eq "bitstream"} {
@@ -315,15 +330,53 @@ if {$target eq "synth" || $target eq "bitstream"} {
 }
 
 if {$target eq "bitstream"} {
-    launch_runs impl_1 -to_step write_bitstream -jobs $jobs
+    # Stop after routing so timing and DRC can gate bitstream generation rather
+    # than merely being reported afterward.  Post-route phys_opt is invoked
+    # explicitly because its managed-run step name differs between Vivado
+    # releases (2025.2 exposes it as "phys_opt_design (Post-Route)").
+    launch_runs impl_1 -to_step route_design -jobs $jobs
     wait_on_run impl_1
     set impl_status [get_property STATUS [get_runs impl_1]]
-    if {![regexp {write_bitstream Complete} $impl_status] && ![regexp {Complete} $impl_status]} {
-        fail "impl_1 write_bitstream did not complete successfully; Vivado status: $impl_status"
+    if {![regexp {Complete} $impl_status]} {
+        fail "impl_1 routing did not complete successfully; Vivado status: $impl_status"
     }
     open_run impl_1
+    if {[catch {phys_opt_design -directive AggressiveExplore} physopt_error]} {
+        fail "post-route phys_opt_design failed: $physopt_error"
+    }
+    write_checkpoint -force [file join $project_dir ${project_name}.runs impl_1 post_route_physopt.dcp]
     report_stage impl [file join $report_root impl]
     report_route_status -file [file join $report_root impl route_status_impl.rpt]
+    check_timing -verbose -file [file join $report_root impl check_timing_impl.rpt]
+
+    set setup_path [get_timing_paths -quiet -setup -max_paths 1 -nworst 1]
+    set hold_path [get_timing_paths -quiet -hold -max_paths 1 -nworst 1]
+    if {[llength $setup_path] == 0 || [llength $hold_path] == 0} {
+        fail "timing analysis returned no setup or hold path"
+    }
+    set setup_wns [get_property SLACK [lindex $setup_path 0]]
+    set hold_whs [get_property SLACK [lindex $hold_path 0]]
+    puts "POST_ROUTE_TIMING setup_WNS=$setup_wns hold_WHS=$hold_whs"
+    if {$setup_wns < 0.0} {
+        fail "100 MHz setup timing is not met (WNS=$setup_wns ns)"
+    }
+    if {$hold_whs < 0.0} {
+        fail "hold timing is not met (WHS=$hold_whs ns)"
+    }
+
+    # report_drc populates the in-memory violation set used here.  Error and
+    # Critical Warning severities both block a deployable artifact.
+    report_drc -file [file join $report_root impl drc_impl.rpt]
+    set blocking_drc [get_drc_violations -quiet -filter {SEVERITY == "Error" || SEVERITY == "Critical Warning"}]
+    if {[llength $blocking_drc] > 0} {
+        puts "Blocking DRC violations: $blocking_drc"
+        fail "implementation has [llength $blocking_drc] Error/Critical Warning DRC violations"
+    }
+
+    set impl_dir [file join $project_dir ${project_name}.runs impl_1]
+    write_bitstream -force -bin_file [file join $impl_dir ${bd_name}_wrapper.bit]
+    write_hw_platform -fixed -include_bit -force \
+        [file join $project_dir ${project_name}.xsa]
 }
 
 puts "PYNQ-Z2 Vivado target '$target' completed."

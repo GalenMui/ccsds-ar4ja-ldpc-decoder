@@ -6,14 +6,13 @@ This flow targets the TUL PYNQ-Z2 board with the Zynq-7000
 ## Build Requirements
 
 - Vivado installed and on `PATH`, or set `VIVADO=/path/to/vivado`.
-- TUL PYNQ-Z2 Vivado board files installed for the final board build.
 - PYNQ Linux on the board for host-side validation.
 
 The Tcl flow searches installed board parts for PYNQ-Z2 and uses the board
-preset when found. If the board files are missing, it falls back to the raw
-`xc7z020clg400-1` part and prints a warning. Use that fallback for structural
-project checks only; install the board files before relying on PS DDR/MIO
-settings for hardware.
+preset when found. The tested Linux-overlay build falls back to the exact
+`xc7z020clg400-1` part and explicitly configures FCLK0, GP0, HP0, and the AXI
+address maps. This is suitable after PYNQ Linux has initialized PS DDR/MIO; do
+not use its XSA as a standalone boot-platform handoff without the TUL preset.
 
 ## Build Commands
 
@@ -23,7 +22,7 @@ From the repository root:
 make pynq-z2-project
 make pynq-z2-synth
 make pynq-z2-bitstream
-make pynq-z2-overlay
+make pynq-z2-package
 ```
 
 Configuration knobs:
@@ -48,8 +47,8 @@ results/pynq_z2/logs/
 The overlay package is:
 
 ```text
-results/pynq_z2/overlay/ccsds_ldpc_pynq_z2.bit
-results/pynq_z2/overlay/ccsds_ldpc_pynq_z2.hwh
+build/pynq_z2/deploy/ccsds_ldpc_pynq_z2.bit
+build/pynq_z2/deploy/ccsds_ldpc_pynq_z2.hwh
 ```
 
 The package directory also includes the PYNQ Python driver, smoke test,
@@ -110,10 +109,12 @@ PL-to-host output:
 
 ## Running On The Board
 
-Copy the generated overlay package directory to the PYNQ-Z2 board. From that
-directory on the board:
+Use `scripts/board/deploy_pynq.sh` to copy the runtime subset to the PYNQ-Z2.
+The build-tested command sequence, evidence paths, and current SSH blocker are
+in `docs/PYNQ_Z2_BRINGUP.md`. From the deployed directory on the board:
 
 ```sh
+python3 load_overlay.py
 python3 smoke_test.py
 python3 smoke_test.py --random-frames 3
 python3 benchmark.py --frames 10

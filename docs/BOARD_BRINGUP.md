@@ -13,13 +13,13 @@ stream contract is in `docs/BOARD_READINESS_AUDIT.md`.
 
 ## Build
 
-Install Vivado and the TUL PYNQ-Z2 board files, then run:
+Install Vivado, then run:
 
 ```sh
 make pynq-z2-project
 make pynq-z2-synth
 make pynq-z2-bitstream
-make pynq-z2-overlay
+make pynq-z2-package
 ```
 
 The Tcl flow is non-interactive and rebuilds the Vivado project and block
@@ -31,20 +31,27 @@ Generated outputs:
 ```text
 results/pynq_z2/vivado/ccsds_ldpc_pynq_z2/
 results/pynq_z2/reports/
-results/pynq_z2/overlay/ccsds_ldpc_pynq_z2.bit
-results/pynq_z2/overlay/ccsds_ldpc_pynq_z2.hwh
+build/pynq_z2/deploy/ccsds_ldpc_pynq_z2.bit
+build/pynq_z2/deploy/ccsds_ldpc_pynq_z2.hwh
 ```
 
 ## Hardware Test
 
-Copy the entire `results/pynq_z2/overlay/` directory to the PYNQ-Z2 board.
-From that directory on the board:
+Deploy the runtime subset into an isolated directory, then connect to the
+PYNQ-Z2:
 
 ```sh
+./scripts/board/deploy_pynq.sh
+ssh pynq
+cd /home/xilinx/jupyter_notebooks/ccsds_ar4ja_ldpc_decoder
+python3 load_overlay.py
 python3 smoke_test.py
 python3 smoke_test.py --random-frames 3
 python3 benchmark.py --frames 10
 ```
+
+See `docs/PYNQ_Z2_BRINGUP.md` for measured timing/DRC evidence and the current
+hardware-test status.
 
 The smoke test loads the overlay, verifies `axi_dma_0`, runs the repository
 golden model, transfers frames through AXI DMA, and compares status plus
